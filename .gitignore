@@ -1,0 +1,5 @@
+.agents
+implementation_plan.md
+.env
+*.pyc/
+__pycache__/
