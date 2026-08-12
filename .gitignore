@@ -3,3 +3,5 @@ implementation_plan.md
 .env
 *.pyc/
 __pycache__/
+.qdrant_storage
+qdrant_storage/
