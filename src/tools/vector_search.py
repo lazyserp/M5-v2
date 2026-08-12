@@ -10,15 +10,11 @@ class VectorStore:
     Vector Store using FastEmbed and Qdrant for semantic code retrieval.
     """
 
-    def __init__(self,in_memory:bool = True) -> None:
+    def __init__(self,storage_path:str = "./qdrant_storage") -> None:
         self.embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         self.vector_size = 384
 
-        if in_memory:
-            self.client = QdrantClient(":memory:")
-        else:
-            self.client = QdrantClient(host="localhost", port=6333)
-
+        self.client = QdrantClient(path=storage_path)
         self.init_collection()
 
 
