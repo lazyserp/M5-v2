@@ -19,11 +19,6 @@ def index_workspace(workspace_root: str = "."):
             ext = os.path.splitext(f)[1].lower()
             if ext in EXTENSION_MAP:
                 rel_path = os.path.relpath(os.path.join(root, f), workspace_root).replace("\\", "/")
-                
-                # 1. Build Dependency Graph
-                dep_graph.add_file(rel_path)
-
-                # 2. Parse AST Blocks
                 try:
                     with open(rel_path, "r", encoding="utf-8", errors="ignore") as code_file:
                         code_content = code_file.read()
@@ -35,6 +30,9 @@ def index_workspace(workspace_root: str = "."):
                     for b in blocks:
                         b["file_path"] = rel_path
                     all_blocks.extend(blocks)
+
+                    # 1. Build Dependency Graph & Index AST Symbols into SQLite
+                    dep_graph.add_file(rel_path, symbols=blocks)
                 except Exception as e:
                     continue
 
