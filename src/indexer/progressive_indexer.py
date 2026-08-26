@@ -1,8 +1,30 @@
 import os
 import threading
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from src.parser.ast_parser import ASTParser, EXTENSION_MAP
-from src.agents.react_loop import get_tenant_tools
+from src.tools.hybrid_search import get_hybrid_retriever
+from src.tools.dependency_graph import PersistentDependencyGraph
+
+def _detect_git_commit(workspace_root: str) -> Optional[str]:
+    """Detects current Git commit SHA from workspace root."""
+    try:
+        git_dir = os.path.join(workspace_root, ".git")
+        if os.path.isdir(git_dir):
+            head_file = os.path.join(git_dir, "HEAD")
+            if os.path.isfile(head_file):
+                with open(head_file, "r", encoding="utf-8", errors="ignore") as f:
+                    head_content = f.read().strip()
+                if head_content.startswith("ref: "):
+                    ref_path = os.path.join(git_dir, head_content[5:].strip())
+                    if os.path.isfile(ref_path):
+                        with open(ref_path, "r", encoding="utf-8", errors="ignore") as rf:
+                            return rf.read().strip()[:40]
+                elif len(head_content) >= 7:
+                    return head_content[:40]
+    except Exception:
+        pass
+    return None
 
 class IngestionStatus:
     """Tracks live indexing metrics per tenant."""
@@ -12,6 +34,9 @@ class IngestionStatus:
         self.indexed_blocks: int = 0
         self.is_indexing: bool = False
         self.last_error: Optional[str] = None
+        self.last_indexed_at: Optional[str] = None
+        self.commit_sha: Optional[str] = None
+        self.workspace_root: str = "."
 
 class ProgressiveIndexer:
     """
@@ -29,15 +54,29 @@ class ProgressiveIndexer:
         key = self._get_status_key(org_id, dept_id, repo_id)
         with self._lock:
             status = self._statuses.get(key, IngestionStatus())
+            commit = status.commit_sha or _detect_git_commit(status.workspace_root)
+            
+            # Progress percentage
+            if status.is_indexing:
+                pct = round((status.indexed_blocks / status.total_blocks * 100), 1) if status.total_blocks > 0 else 0.0
+                state = "indexing"
+            else:
+                pct = 100.0 if status.total_blocks > 0 else 100.0
+                state = "ready" if status.total_blocks > 0 else "idle"
+
             return {
                 "org_id": org_id,
                 "dept_id": dept_id,
                 "repo_id": repo_id,
+                "status": state,
+                "is_fresh": not status.is_indexing and status.total_blocks > 0,
                 "total_files": status.total_files,
                 "total_blocks": status.total_blocks,
-                "indexed_blocks": status.indexed_blocks,
+                "indexed_blocks": status.indexed_blocks if status.is_indexing else status.total_blocks,
                 "is_indexing": status.is_indexing,
-                "progress_percentage": round((status.indexed_blocks / status.total_blocks * 100), 1) if status.total_blocks > 0 else 100.0,
+                "progress_percentage": pct,
+                "commit_sha": commit,
+                "last_indexed_at": status.last_indexed_at or datetime.now(timezone.utc).isoformat(),
                 "last_error": status.last_error
             }
 
@@ -54,17 +93,20 @@ class ProgressiveIndexer:
         """
         key = self._get_status_key(org_id, dept_id, repo_id)
         with self._lock:
-            self._statuses[key] = IngestionStatus()
+            if key not in self._statuses:
+                self._statuses[key] = IngestionStatus()
             status = self._statuses[key]
             status.is_indexing = True
+            status.workspace_root = workspace_root
+            status.commit_sha = _detect_git_commit(workspace_root)
 
-        _, _, d_graph = get_tenant_tools(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+        d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
         all_blocks = []
         file_count = 0
-        ignore_dirs = {".git", "__pycache__", "venv", ".venv", "node_modules", "qdrant_storage"}
+        ignore_dirs = {".git", "__pycache__", "venv", ".venv", "node_modules", "qdrant_storage", "target", "dist", "build"}
 
         for root, dirs, files in os.walk(workspace_root):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs]
 
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
@@ -92,9 +134,18 @@ class ProgressiveIndexer:
                     except Exception:
                         continue
 
+        # Instantly populate BM25 in retriever so keyword search is ready immediately
+        if all_blocks:
+            retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+            retriever.indexed_blocks = list(all_blocks)
+            retriever.bm25_index.index_blocks(all_blocks)
+
         with self._lock:
             status.total_files = file_count
             status.total_blocks = len(all_blocks)
+            status.indexed_blocks = len(all_blocks)
+            status.is_indexing = False
+            status.last_indexed_at = datetime.now(timezone.utc).isoformat()
 
         return file_count, all_blocks
 
@@ -111,8 +162,12 @@ class ProgressiveIndexer:
         """
         def _worker():
             key = self._get_status_key(org_id, dept_id, repo_id)
-            _, retriever, _ = get_tenant_tools(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+            retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
             
+            with self._lock:
+                if key in self._statuses:
+                    self._statuses[key].is_indexing = True
+
             try:
                 for i in range(0, len(blocks), batch_size):
                     batch = blocks[i : i + batch_size]
@@ -128,6 +183,7 @@ class ProgressiveIndexer:
                 with self._lock:
                     if key in self._statuses:
                         self._statuses[key].is_indexing = False
+                        self._statuses[key].last_indexed_at = datetime.now(timezone.utc).isoformat()
 
         worker_thread = threading.Thread(target=_worker, daemon=True)
         worker_thread.start()
@@ -147,19 +203,13 @@ class ProgressiveIndexer:
         Tier 4: Sub-second atomic synchronization for GitHub/GitLab webhook push events.
         Processes only added/modified/removed files (<200ms per commit).
         """
-        _, retriever, d_graph = get_tenant_tools(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
-        v_store = retriever.vector_store
+        retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+        d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
 
         # 1. Handle Removed Files
         for rel_path in removed:
             norm_path = os.path.normpath(rel_path).replace("\\", "/")
             d_graph.remove_file(norm_path)
-            # Remove vector points by file_path filter if supported
-            try:
-                # In Qdrant, points are purged or re-indexed
-                pass
-            except Exception:
-                pass
 
         # 2. Handle Added & Modified Files
         files_to_sync = list(set(added + modified))

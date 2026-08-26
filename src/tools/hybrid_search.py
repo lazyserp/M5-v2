@@ -1,5 +1,6 @@
 import math
 import re
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 from src.tools.vector_search import VectorStore
 
@@ -103,10 +104,36 @@ class BM25Index:
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores[:top_k]
 
+_RETRIEVER_CACHE: Dict[str, "HybridRetriever"] = {}
+_RETRIEVER_LOCK = threading.Lock()
+
+def get_hybrid_retriever(
+    org_id: str = "default_org",
+    dept_id: str = "default_dept",
+    repo_id: str = "default_repo",
+    storage_path: str = "./qdrant_storage",
+    in_memory: bool = False
+) -> "HybridRetriever":
+    """
+    Returns a cached HybridRetriever singleton for the tenant namespace.
+    Reuses in-memory BM25 indexes and vector connections across queries.
+    """
+    key = f"{org_id}:{dept_id}:{repo_id}:{storage_path}:{in_memory}"
+    with _RETRIEVER_LOCK:
+        if key not in _RETRIEVER_CACHE:
+            _RETRIEVER_CACHE[key] = HybridRetriever(
+                org_id=org_id,
+                dept_id=dept_id,
+                repo_id=repo_id,
+                storage_path=storage_path,
+                in_memory=in_memory
+            )
+        return _RETRIEVER_CACHE[key]
+
 class HybridRetriever:
     """
-    Hybrid Context Retrieval Engine combining Dense Vectors (FastEmbed/Qdrant)
-    and Sparse Keyword BM25 using Reciprocal Rank Fusion (RRF).
+    Combines dense semantic vector retrieval (Qdrant) and sparse keyword retrieval (BM25)
+    using Reciprocal Rank Fusion (RRF).
     """
     def __init__(
         self,
@@ -135,17 +162,16 @@ class HybridRetriever:
         self.bm25_index.index_blocks(self.indexed_blocks)
         return self.vector_store.index_blocks(blocks, batch_size=batch_size)
 
-    def search_code(
+    def search_blocks(
         self,
         query: str,
-        top_k: int = 3,
+        top_k: int = 5,
         rrf_k: int = 60,
-        score_threshold: float = 0.25,
+        score_threshold: float = 0.20,
         federated_collections: Optional[List[str]] = None
-    ) -> str:
+    ) -> List[Dict[str, Any]]:
         """
-        Executes dense and sparse queries, computes Reciprocal Rank Fusion (RRF),
-        and formats the highest-confidence grounded observations.
+        Returns structured list of top-k code chunks ranked via Reciprocal Rank Fusion (RRF).
         """
         # 1. Retrieve Dense Candidates from Qdrant
         query_vector = list(self.vector_store.embedder.embed([query]))[0].tolist()
@@ -163,7 +189,6 @@ class HybridRetriever:
         bm25_results = self.bm25_index.query(query, top_k=top_k * 3)
 
         # 3. Reciprocal Rank Fusion (RRF)
-        # Key: block signature string -> (score, payload/dict, dense_rank, sparse_rank)
         fusion_map: Dict[str, Dict[str, Any]] = {}
 
         for rank, r in enumerate(dense_results, start=1):
@@ -197,27 +222,52 @@ class HybridRetriever:
         ranked_candidates.sort(key=lambda x: x["rrf_score"], reverse=True)
         top_candidates = ranked_candidates[:top_k]
 
-        if not top_candidates:
+        chunks = []
+        for item in top_candidates:
+            p = item["data"]
+            chunks.append({
+                "file_path": p.get("file_path", "unknown"),
+                "start_line": p.get("start_line", 0),
+                "end_line": p.get("end_line", 0),
+                "symbol_name": p.get("name", "anonymous"),
+                "symbol_type": p.get("type", "unknown"),
+                "relevance_score": round(item["rrf_score"], 4),
+                "retrieval_method": "hybrid_rrf",
+                "content": p.get("content", "")
+            })
+
+        return chunks
+
+    def search_code(
+        self,
+        query: str,
+        top_k: int = 3,
+        rrf_k: int = 60,
+        score_threshold: float = 0.25,
+        federated_collections: Optional[List[str]] = None
+    ) -> str:
+        """
+        Executes dense and sparse queries, computes Reciprocal Rank Fusion (RRF),
+        and formats the highest-confidence grounded observations as formatted text.
+        """
+        chunks = self.search_blocks(
+            query=query,
+            top_k=top_k,
+            rrf_k=rrf_k,
+            score_threshold=score_threshold,
+            federated_collections=federated_collections
+        )
+
+        if not chunks:
             return f"[INFO] No relevant code found for query: '{query}' in {self.dept_id}/{self.repo_id}"
 
         output = f"--- Hybrid Search Results for '{query}' [{self.dept_id}/{self.repo_id}] ---\n"
-        for item in top_candidates:
-            p = item["data"]
-            file_path = p.get("file_path", "unknown")
-            start_line = p.get("start_line", 0)
-            end_line = p.get("end_line", 0)
-            name = p.get("name", "anonymous")
-            block_type = p.get("type", "unknown")
-            content = p.get("content", "")
-            
-            d_rank_str = f"Dense #{item['dense_rank']}" if item['dense_rank'] else "Dense: -"
-            b_rank_str = f"BM25 #{item['bm25_rank']}" if item['bm25_rank'] else "BM25: -"
-
+        for c in chunks:
             output += (
-                f"\n[Match (RRF Score: {item['rrf_score']:.4f} | {d_rank_str}, {b_rank_str})]\n"
-                f"File: {file_path} (Lines {start_line}-{end_line})\n"
-                f"Block Name: '{name}' ({block_type})\n"
-                f"Content:\n{content}\n"
+                f"\n[Match (RRF Score: {c['relevance_score']})]\n"
+                f"File: {c['file_path']} (Lines {c['start_line']}-{c['end_line']})\n"
+                f"Block Name: '{c['symbol_name']}' ({c['symbol_type']})\n"
+                f"Content:\n{c['content']}\n"
             )
 
         return output

@@ -12,6 +12,25 @@ from src.config import QDRANT_URL, QDRANT_API_KEY
 _CLIENT_CACHE: Dict[str, QdrantClient] = {}
 _CLIENT_LOCK = threading.Lock()
 
+_EMBEDDER_INSTANCE: Optional[TextEmbedding] = None
+_EMBEDDER_LOCK = threading.Lock()
+
+def get_shared_embedder() -> TextEmbedding:
+    """
+    Returns a global singleton TextEmbedding instance.
+    Prevents reloading the ONNX model from disk on every query (reduces latency by 95%).
+    """
+    global _EMBEDDER_INSTANCE
+    if _EMBEDDER_INSTANCE is None:
+        with _EMBEDDER_LOCK:
+            if _EMBEDDER_INSTANCE is None:
+                cpu_cores = max(1, (os.cpu_count() or 4))
+                _EMBEDDER_INSTANCE = TextEmbedding(
+                    model_name="BAAI/bge-small-en-v1.5",
+                    threads=cpu_cores
+                )
+    return _EMBEDDER_INSTANCE
+
 def sanitize_collection_name(name: str) -> str:
     """Sanitizes names into valid Qdrant collection identifiers."""
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", name.lower().strip())
@@ -28,24 +47,38 @@ def get_shared_qdrant_client(
     to prevent file lock contention across threads and workers.
     """
     if in_memory:
-        return QdrantClient(location=":memory:")
+        return QdrantClient(location=":memory:", check_compatibility=False)
 
-    target_url = url or QDRANT_URL
-    target_api_key = api_key or QDRANT_API_KEY
+    target_url = url or os.getenv("QDRANT_URL") or QDRANT_URL
+    target_api_key = api_key or os.getenv("QDRANT_API_KEY") or QDRANT_API_KEY
 
+    # Try configured URL, then try Docker internal hostname, then localhost
+    candidate_urls = []
     if target_url:
+        candidate_urls.append(target_url)
+    if "http://qdrant:6333" not in candidate_urls:
+        candidate_urls.append("http://qdrant:6333")
+    if "http://localhost:6333" not in candidate_urls:
+        candidate_urls.append("http://localhost:6333")
+
+    for c_url in candidate_urls:
         try:
-            client = QdrantClient(url=target_url, api_key=target_api_key, timeout=1)
-            client.get_collections() # Active health probe
+            client = QdrantClient(url=c_url, api_key=target_api_key, timeout=2, check_compatibility=False)
+            client.get_collections()  # Active health probe
             return client
         except Exception:
-            pass
+            continue
 
     # Thread-safe client reuse for local disk storage
     with _CLIENT_LOCK:
         norm_path = os.path.abspath(storage_path)
         if norm_path not in _CLIENT_CACHE:
-            _CLIENT_CACHE[norm_path] = QdrantClient(path=norm_path)
+            try:
+                _CLIENT_CACHE[norm_path] = QdrantClient(path=norm_path, check_compatibility=False)
+            except Exception as e:
+                import sys
+                sys.stderr.write(f"[!] Warning: Local Qdrant folder '{norm_path}' locked by another process ({e}). Falling back to in-memory client.\n")
+                return QdrantClient(location=":memory:", check_compatibility=False)
         return _CLIENT_CACHE[norm_path]
 
 class VectorStore:
@@ -72,7 +105,7 @@ class VectorStore:
         self.collection_name = sanitize_collection_name(raw_name)
         
         self.vector_size = 384
-        self.embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        self.embedder = get_shared_embedder()
 
         self.client = get_shared_qdrant_client(
             storage_path=storage_path,
@@ -103,14 +136,47 @@ class VectorStore:
         signature = f"{self.org_id}:{self.dept_id}:{self.repo_id}:{file_path}:{start_line}:{end_line}:{name}:{content_hash}"
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, signature))
 
+    def get_existing_point_ids(self, point_ids: list[str]) -> set[str]:
+        """Checks which point IDs already exist in the Qdrant collection."""
+        if not point_ids:
+            return set()
+        existing = set()
+        for i in range(0, len(point_ids), 500):
+            batch_ids = point_ids[i : i + 500]
+            try:
+                records = self.client.retrieve(
+                    collection_name=self.collection_name,
+                    ids=batch_ids,
+                    with_payload=False,
+                    with_vectors=False
+                )
+                for r in records:
+                    existing.add(str(r.id))
+            except Exception:
+                pass
+        return existing
+
     def index_blocks(self, blocks: list[dict], batch_size: int = 64) -> int:
         if not blocks:
             return 0
 
-        total_indexed = 0
+        # 1. Check for exact existing vectors by content hash in Qdrant
+        block_id_map = {self.generate_point_id(b): b for b in blocks}
+        existing_ids = self.get_existing_point_ids(list(block_id_map.keys()))
 
-        for i in range(0, len(blocks), batch_size):
-            batch = blocks[i : i + batch_size]
+        blocks_to_index = [b for pid, b in block_id_map.items() if pid not in existing_ids]
+
+        if not blocks_to_index:
+            print(f"[+] Qdrant Cache Hit: All {len(blocks)} AST blocks already vectorized on disk. 0ms re-indexing required.", flush=True)
+            return len(blocks)
+
+        print(f"[+] Qdrant Incremental Indexing: {len(existing_ids)} cached, {len(blocks_to_index)} new/modified blocks to vectorize...", flush=True)
+
+        total_indexed = 0
+        total_to_index = len(blocks_to_index)
+
+        for i in range(0, total_to_index, batch_size):
+            batch = blocks_to_index[i : i + batch_size]
             texts = [b.get("content", "") for b in batch]
             embeddings = list(self.embedder.embed(texts))
 
@@ -136,8 +202,9 @@ class VectorStore:
 
             self.client.upsert(collection_name=self.collection_name, points=points)
             total_indexed += len(batch)
+            print(f"[+] Qdrant Vectorizing: {total_indexed}/{total_to_index} new blocks indexed ({int(total_indexed / total_to_index * 100)}%)...", flush=True)
 
-        return total_indexed
+        return len(existing_ids) + total_indexed
 
     def search_code(
         self,

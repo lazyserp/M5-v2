@@ -69,8 +69,14 @@ class PersistentDependencyGraph:
                 self._mem_conn.execute("PRAGMA foreign_keys = ON;")
             return self._mem_conn
         conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+        except Exception:
+            try:
+                conn.execute("PRAGMA journal_mode = DELETE;")
+            except Exception:
+                pass
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
@@ -225,6 +231,15 @@ class PersistentDependencyGraph:
                 if os.path.isfile(clean_c):
                     return clean_c
 
+        elif ext == "java":
+            # Java imports: com.codeduel.codeduel.submission.service.CodeExecutorService
+            target_class = imported_module.split(".")[-1]
+            java_path = "src/main/java/" + imported_module.replace(".", "/") + ".java"
+            if os.path.isfile(java_path):
+                return java_path
+            # Return canonical module name if direct file not at workspace root
+            return imported_module.replace(".", "/") + ".java"
+
         elif ext in ["js", "ts", "jsx", "tsx"]:
             # Handle relative JS/TS imports: './utils', '../config'
             for test_ext in [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"]:
@@ -234,6 +249,71 @@ class PersistentDependencyGraph:
                     return clean_c
 
         return None
+
+    def get_outgoing_edges(self, file_path: str) -> List[Dict[str, str]]:
+        """Returns list of outgoing dependency dicts [{'target_file': ..., 'raw_import': ...}]."""
+        norm_path = os.path.normpath(file_path).replace("\\", "/")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT target_file, raw_import FROM dependencies WHERE source_file = ?", (norm_path,))
+            rows = cursor.fetchall()
+        return [{"target_file": target, "raw_import": raw} for target, raw in rows]
+
+    def get_incoming_edges(self, file_path: str) -> List[Dict[str, str]]:
+        """Returns list of incoming dependent dicts [{'source_file': ..., 'raw_import': ...}]."""
+        norm_path = os.path.normpath(file_path).replace("\\", "/")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT source_file, raw_import FROM dependencies WHERE target_file = ?", (norm_path,))
+            rows = cursor.fetchall()
+        return [{"source_file": source, "raw_import": raw} for source, raw in rows]
+
+    def get_edges_between_files(self, file_paths: List[str]) -> List[Dict[str, str]]:
+        """Returns explicit directed dependency edges connecting any of the given files."""
+        if not file_paths:
+            return []
+        norm_paths = [os.path.normpath(p).replace("\\", "/") for p in file_paths]
+        placeholders = ",".join("?" for _ in norm_paths)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT source_file, target_file, raw_import 
+                FROM dependencies 
+                WHERE source_file IN ({placeholders}) AND target_file IN ({placeholders})
+            """, norm_paths + norm_paths)
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "source": src,
+                "target": tgt,
+                "relationship": "imports",
+                "import_statement": raw
+            }
+            for src, tgt, raw in rows
+        ]
+
+    def find_companion_tests(self, file_path: str) -> List[str]:
+        """Finds matching test files for a given implementation file."""
+        norm_path = os.path.normpath(file_path).replace("\\", "/")
+        base_name = os.path.splitext(os.path.basename(norm_path))[0]
+        test_patterns = [
+            f"{base_name}Test%",
+            f"{base_name}Tests%",
+            f"%test_{base_name}%",
+            f"{base_name}.test%"
+        ]
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            results = []
+            for pat in test_patterns:
+                cursor.execute("SELECT file_path FROM file_nodes WHERE file_path LIKE ?", (pat,))
+                for (row,) in cursor.fetchall():
+                    if row not in results and row != norm_path:
+                        results.append(row)
+        return results
 
     def get_dependencies(self, file_path: str) -> str:
         """
