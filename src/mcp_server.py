@@ -14,16 +14,33 @@ SERVER_VERSION = "3.0.0"
 
 # ── Lean retrieval helper (no LLM / agent machinery) ─────────────────────────
 def get_retrieval_tools(
-    org_id: str = "default_org",
-    dept_id: str = "default_dept",
-    repo_id: str = "default_repo"
+    org_id: Optional[str] = None,
+    dept_id: Optional[str] = None,
+    repo_id: Optional[str] = None
 ):
     """
-    Returns tenant-scoped retrieval primitives only.
-    No LLM, no agent loop, no write/execute tools.
+    Returns tenant-scoped retrieval primitives dynamically resolved from
+    environment variables or active Qdrant collections.
     """
-    retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
-    d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+    resolved_org = org_id or os.getenv("DEFAULT_ORG_ID", "default_org")
+    resolved_dept = dept_id or os.getenv("DEFAULT_DEPT_ID", "default_dept")
+    resolved_repo = repo_id or os.getenv("DEFAULT_REPO_ID", "default_repo")
+
+    # If still pointing to default_org, check for single active collection in Qdrant
+    if resolved_org == "default_org" and resolved_repo == "default_repo":
+        try:
+            from src.tools.vector_search import get_shared_qdrant_client
+            client = get_shared_qdrant_client()
+            collections = [c.name for c in client.get_collections().collections if c.name.startswith("m5_")]
+            if len(collections) == 1 and collections[0] != "m5_default_org_default_dept_default_repo":
+                parts = collections[0][3:].split("_")
+                if len(parts) >= 3:
+                    resolved_org, resolved_dept, resolved_repo = parts[0], parts[1], "_".join(parts[2:])
+        except Exception:
+            pass
+
+    retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
+    d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
     return retriever, d_graph
 
 # ── MCP Tool Schemas (read-only core tools only) ──────────────────────────────
@@ -39,9 +56,9 @@ MCP_TOOLS_SCHEMA = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Natural language query or code snippet"},
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"},
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"},
                 "top_k": {"type": "integer", "default": 5, "description": "Top-k code blocks to retrieve"},
                 "expand_dependencies": {"type": "boolean", "default": True, "description": "Also fetch imports of matched files"},
                 "expand_depth": {"type": "integer", "default": 1, "description": "Dependency expansion hops (1 or 2)"},
@@ -58,9 +75,9 @@ MCP_TOOLS_SCHEMA = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Natural language query or code snippet"},
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"},
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"},
                 "top_k": {"type": "integer", "default": 3, "description": "Number of top results to return"}
             },
             "required": ["query"]
@@ -87,9 +104,9 @@ MCP_TOOLS_SCHEMA = [
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Relative workspace file path"},
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"}
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"}
             },
             "required": ["file_path"]
         }
@@ -101,9 +118,9 @@ MCP_TOOLS_SCHEMA = [
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Relative workspace file path"},
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"}
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"}
             },
             "required": ["file_path"]
         }
@@ -115,9 +132,9 @@ MCP_TOOLS_SCHEMA = [
             "type": "object",
             "properties": {
                 "symbol_name": {"type": "string", "description": "Function, class, or variable name to locate"},
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"}
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"}
             },
             "required": ["symbol_name"]
         }
@@ -141,9 +158,9 @@ MCP_TOOLS_SCHEMA = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "org_id": {"type": "string", "default": "default_org"},
-                "dept_id": {"type": "string", "default": "default_dept"},
-                "repo_id": {"type": "string", "default": "default_repo"}
+                "org_id": {"type": "string", "description": "Optional tenant organization"},
+                "dept_id": {"type": "string", "description": "Optional department namespace"},
+                "repo_id": {"type": "string", "description": "Optional repository identifier"}
             }
         }
     },
@@ -167,9 +184,8 @@ MCP_TOOLS_SCHEMA = [
 
 class MCPServer:
     """
-    Model Context Protocol (MCP) JSON-RPC 2.0 Server over STDIO.
+    Model Context Protocol (MCP) JSON-RPC 2.0 Server over STDIO and HTTP.
     Exposes read-only context retrieval tools only.
-    Write/execute/agent tools are in experimental/ and not exposed by default.
     """
     def __init__(self):
         self.running = True
@@ -223,9 +239,32 @@ class MCPServer:
         args: Dict[str, Any],
         api_key_override: Optional[str] = None
     ) -> Dict[str, Any]:
-        org_id = args.get("org_id", "default_org")
-        dept_id = args.get("dept_id", "default_dept")
-        repo_id = args.get("repo_id", "default_repo")
+        # Smart Namespace Fallback:
+        default_org = os.getenv("DEFAULT_ORG_ID", "default_org")
+        default_dept = os.getenv("DEFAULT_DEPT_ID", "default_dept")
+        default_repo = os.getenv("DEFAULT_REPO_ID", "default_repo")
+
+        raw_org = args.get("org_id")
+        raw_dept = args.get("dept_id")
+        raw_repo = args.get("repo_id")
+
+        org_id = default_org if (not raw_org or raw_org == "default_org") else raw_org
+        dept_id = default_dept if (not raw_dept or raw_dept == "default_dept") else raw_dept
+        repo_id = default_repo if (not raw_repo or raw_repo == "default_repo") else raw_repo
+
+        # If still default_org, check if there is an active non-default collection in Qdrant
+        if org_id == "default_org" and repo_id == "default_repo":
+            try:
+                from src.tools.vector_search import get_shared_qdrant_client
+                client = get_shared_qdrant_client()
+                collections = [c.name for c in client.get_collections().collections if c.name.startswith("m5_")]
+                if len(collections) == 1 and collections[0] != "m5_default_org_default_dept_default_repo":
+                    parts = collections[0][3:].split("_")
+                    if len(parts) >= 3:
+                        org_id, dept_id, repo_id = parts[0], parts[1], "_".join(parts[2:])
+            except Exception:
+                pass
+
         caller_name = "mcp/client"
 
         retriever, d_graph = get_retrieval_tools(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
@@ -300,24 +339,27 @@ class MCPServer:
             # ── Skills ────────────────────────────────────────────────────
             elif tool_name == "m5_list_skills":
                 from src.parser.customizations import customization_manager
-                output = json.dumps(customization_manager.list_skills(), indent=2)
+                skills = customization_manager.list_skills()
+                output = json.dumps({"skills": skills}, indent=2)
 
             elif tool_name == "m5_load_skill":
+                skill_name = args.get("skill_name", "")
                 from src.parser.customizations import customization_manager
-                output = json.dumps(customization_manager.load_skill(args.get("skill_name", "")), indent=2)
+                detail = customization_manager.load_skill(skill_name)
+                output = json.dumps(detail, indent=2)
 
             else:
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {"code": -32602, "message": f"Unknown tool: '{tool_name}'"}
+                    "error": {"code": -32601, "message": f"Tool '{tool_name}' not recognized."}
                 }
 
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [{"type": "text", "text": str(output)}]
+                    "content": [{"type": "text", "text": output}]
                 }
             }
 
@@ -329,34 +371,27 @@ class MCPServer:
             }
 
     def run_stdio(self):
-        """Standard synchronous I/O loop for MCP client communication over STDIO."""
-        while self.running:
+        """STDIO JSON-RPC 2.0 loop for local CLI / IDE clients."""
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
             try:
-                line = sys.stdin.readline()
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                req_json = json.loads(line)
-                resp_json = self.handle_request(req_json)
-                if resp_json:
-                    sys.stdout.write(json.dumps(resp_json) + "\n")
+                req = json.loads(line)
+                res = self.handle_request(req)
+                if res is not None:
+                    sys.stdout.write(json.dumps(res) + "\n")
                     sys.stdout.flush()
-            except Exception as e:
-                err_resp = {
+            except json.JSONDecodeError as e:
+                err_res = {
                     "jsonrpc": "2.0",
                     "id": None,
                     "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
                 }
-                sys.stdout.write(json.dumps(err_resp) + "\n")
+                sys.stdout.write(json.dumps(err_res) + "\n")
                 sys.stdout.flush()
 
 mcp_server = MCPServer()
 
-def main():
-    server = MCPServer()
-    server.run_stdio()
-
 if __name__ == "__main__":
-    main()
+    mcp_server.run_stdio()

@@ -181,10 +181,27 @@ def get_context(
     Returns:
         A ContextBundle dict with chunks, explicit dependency edges, test citations, omissions, and explainable scores.
     """
+    resolved_org = org_id or os.getenv("DEFAULT_ORG_ID", "default_org")
+    resolved_dept = dept_id or os.getenv("DEFAULT_DEPT_ID", "default_dept")
+    resolved_repo = repo_id or os.getenv("DEFAULT_REPO_ID", "default_repo")
+
+    # If still default_org, check if single custom collection exists in Qdrant
+    if resolved_org == "default_org" and resolved_repo == "default_repo":
+        try:
+            from src.tools.vector_search import get_shared_qdrant_client
+            client = get_shared_qdrant_client()
+            collections = [c.name for c in client.get_collections().collections if c.name.startswith("m5_")]
+            if len(collections) == 1 and collections[0] != "m5_default_org_default_dept_default_repo":
+                parts = collections[0][3:].split("_")
+                if len(parts) >= 3:
+                    resolved_org, resolved_dept, resolved_repo = parts[0], parts[1], "_".join(parts[2:])
+        except Exception:
+            pass
+
     request_id = str(uuid.uuid4())
 
-    retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
-    d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+    retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
+    d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
 
     warnings: List[str] = []
     omissions: List[str] = []
