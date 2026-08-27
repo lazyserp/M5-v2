@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from typing import Optional
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from src.logger import setup_m5_logger
 from src.parser.ast_parser import ASTParser, EXTENSION_MAP
 from src.indexer.progressive_indexer import progressive_indexer
 from src.indexer.git_manager import git_manager
@@ -17,7 +19,7 @@ from src.api.webhooks import webhook_router
 from src.tools.hybrid_search import HybridRetriever, get_hybrid_retriever
 from src.tools.dependency_graph import PersistentDependencyGraph
 
-logger = logging.getLogger("m5")
+logger = setup_m5_logger("m5.server")
 
 # ── Feature flags (read from environment) ───────────────────────────────────
 DEV_AGENT_MODE = os.getenv("M5_ENABLE_DEV_AGENT_MODE", "false").lower() == "true"
@@ -25,12 +27,7 @@ ADMIN_KEY = os.getenv("M5_ADMIN_KEY", "")
 
 # ── Startup warning when dev mode is on ─────────────────────────────────────
 if DEV_AGENT_MODE:
-    import warnings
-    warnings.warn(
-        "[WARN] Dev agent mode is ON — M5 is invoking its own LLM and departing from "
-        "the pure context-provider architecture. Do not enable in production.",
-        stacklevel=1
-    )
+    logger.warning("Dev agent mode is ON — M5 is invoking its own LLM. Do not enable in production.")
 
 # ── Initialize FastAPI ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -50,6 +47,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Request Logging Middleware ───────────────────────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration_ms = round((time.time() - start_time) * 1000, 2)
+    path = request.url.path
+    if path not in ("/health", "/ready"):
+        logger.info(f"{request.method} {path} -> status={response.status_code} elapsed={duration_ms}ms")
+    return response
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(webhook_router)
@@ -95,6 +103,7 @@ def serve_ui():
 def startup_event():
     """Auto-index default workspace and vectorize 100% of codebase into Qdrant on startup."""
     from src.tools.vector_search import get_shared_embedder, VectorStore
+    logger.info("Initializing ONNX embedding model (BAAI/bge-small-en-v1.5)...")
     get_shared_embedder()
 
     workspace_root = os.getenv("WORKSPACE_ROOT", ".")
@@ -102,7 +111,7 @@ def startup_event():
     dept_id = os.getenv("DEFAULT_DEPT_ID", "default_dept")
     repo_id = os.getenv("DEFAULT_REPO_ID", "default_repo")
 
-    print(f"\n[+] M5 Startup: Parsing & Vectorizing codebase '{workspace_root}' into Qdrant...", flush=True)
+    logger.info(f"Parsing & Vectorizing workspace '{workspace_root}' into Qdrant...")
     files_count, blocks = progressive_indexer.tier0_instant_boot(
         workspace_root=workspace_root,
         org_id=org_id,
@@ -113,12 +122,10 @@ def startup_event():
     if blocks:
         v_store = VectorStore(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
         indexed_count = v_store.index_blocks(blocks, batch_size=64)
-        print(f"[SUCCESS] Qdrant Vectorization Complete: {indexed_count} AST blocks permanently indexed.", flush=True)
+        logger.info(f"Qdrant Vectorization Complete: {indexed_count} AST blocks permanently indexed.")
 
-    print(
-        f"[+] M5 v2 Server Online: Ready to serve queries with 100% vectorized context.",
-        flush=True
-    )
+    logger.info("M5 v2 Context Engine Server Online on port 8000.")
+
 
 # ── Health & Readiness ────────────────────────────────────────────────────────
 @app.get("/health")

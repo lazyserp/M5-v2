@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "m5-remote": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer local_dev_key"
+      }
+    }
+  }
+}
+
+
+
+{
+  "mcpServers": {
+    "m5-enterprise": {
+      "url": "https://m5.internal.company.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:M5_API_KEY}"
+      }
+    }
+  }
+}

@@ -2,9 +2,13 @@ import os
 import threading
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
+from src.logger import setup_m5_logger
 from src.parser.ast_parser import ASTParser, EXTENSION_MAP
 from src.tools.hybrid_search import get_hybrid_retriever
 from src.tools.dependency_graph import PersistentDependencyGraph
+
+logger = setup_m5_logger("m5.indexer")
+
 
 def _detect_git_commit(workspace_root: str) -> Optional[str]:
     """Detects current Git commit SHA from workspace root."""
@@ -245,6 +249,11 @@ class ProgressiveIndexer:
         if new_blocks:
             retriever.index_blocks(new_blocks)
 
+        logger.info(
+            f"Git Delta Sync Complete for '{org_id}/{repo_id}': "
+            f"{len(added)} added, {len(modified)} modified, {len(removed)} removed, {len(new_blocks)} vector blocks updated."
+        )
+
         return {
             "status": "synchronized",
             "added_count": len(added),
@@ -252,6 +261,7 @@ class ProgressiveIndexer:
             "removed_count": len(removed),
             "blocks_updated": len(new_blocks)
         }
+
 
 # Global Singleton Indexer
 progressive_indexer = ProgressiveIndexer()

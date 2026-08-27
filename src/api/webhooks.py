@@ -4,8 +4,10 @@ import hashlib
 from typing import Dict, Any, List
 from fastapi import APIRouter, Request, Header, HTTPException, BackgroundTasks, status
 from pydantic import BaseModel, Field
+from src.logger import setup_m5_logger
 from src.indexer.progressive_indexer import progressive_indexer
 
+logger = setup_m5_logger("m5.webhook")
 webhook_router = APIRouter(prefix="/api/webhooks", tags=["Webhooks"])
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
@@ -42,10 +44,12 @@ async def github_webhook_endpoint(
 
     # 1. Verify Webhook Signature
     if not verify_github_signature(payload_bytes, x_hub_signature_256):
+        logger.error("GitHub Webhook rejected: Invalid HMAC SHA-256 signature")
         raise HTTPException(status_code=403, detail="Invalid HMAC webhook signature.")
 
     # 2. Ignore non-push events (e.g. ping, star)
     if x_github_event != "push":
+        logger.info(f"Received GitHub webhook event '{x_github_event}' (ignored)")
         return WebhookSyncResponse(
             status="ignored",
             event=x_github_event,
@@ -69,12 +73,21 @@ async def github_webhook_endpoint(
         modified_files.extend(commit.get("modified", []))
         removed_files.extend(commit.get("removed", []))
 
+    added_clean = list(set(added_files))
+    modified_clean = list(set(modified_files))
+    removed_clean = list(set(removed_files))
+
+    logger.info(
+        f"GitHub Push Webhook received for '{org_name}/{repo_name}': "
+        f"{len(added_clean)} added, {len(modified_clean)} modified, {len(removed_clean)} removed files. Queueing delta sync..."
+    )
+
     # 4. Offload Delta Synchronization to Background Task
     background_tasks.add_task(
         progressive_indexer.process_git_delta,
-        added=list(set(added_files)),
-        modified=list(set(modified_files)),
-        removed=list(set(removed_files)),
+        added=added_clean,
+        modified=modified_clean,
+        removed=removed_clean,
         workspace_root=".",
         org_id=org_name,
         dept_id="engineering",
@@ -86,5 +99,6 @@ async def github_webhook_endpoint(
         event=x_github_event,
         repository=f"{org_name}/{repo_name}",
         commits_processed=len(payload.get("commits", [])),
-        message=f"Queued delta sync for {len(added_files)} added, {len(modified_files)} modified, and {len(removed_files)} removed files."
+        message=f"Queued delta sync for {len(added_clean)} added, {len(modified_clean)} modified, and {len(removed_clean)} removed files."
     )
+
