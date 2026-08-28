@@ -107,7 +107,10 @@ class ProgressiveIndexer:
         d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
         all_blocks = []
         file_count = 0
-        ignore_dirs = {".git", "__pycache__", "venv", ".venv", "node_modules", "qdrant_storage", "target", "dist", "build"}
+        ignore_dirs = {
+            ".git", "__pycache__", "venv", ".venv", "node_modules",
+            "qdrant_storage", "storage", "repos", "target", "dist", "build", ".pytest_cache"
+        }
 
         for root, dirs, files in os.walk(workspace_root):
             dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs]

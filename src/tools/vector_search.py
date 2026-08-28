@@ -181,6 +181,9 @@ class VectorStore:
         if not blocks:
             return 0
 
+        # 0. Ensure collection exists in Qdrant (in case Qdrant was wiped/restarted)
+        self._ensure_collection()
+
         # 1. Check for exact existing vectors by content hash in Qdrant
         block_id_map = {self.generate_point_id(b): b for b in blocks}
         existing_ids = self.get_existing_point_ids(list(block_id_map.keys()))
