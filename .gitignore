@@ -30,8 +30,7 @@ qdrant_data/
 *.tar.gz
 
 # ── Local IDE, Editor & Live MCP Configuration ────────────────────────────────
-.vscode/*
-!.vscode/mcp.json.example
+.vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
@@ -57,8 +56,12 @@ temp/
 logs/
 *.log
 
-# ── Agent System Internal Workspaces ──────────────────────────────────────────
+# ── Agent System Internal Workspaces & Local Notes ────────────────────────────
 .agents/
+.vscode/
 implementation_plan.md
 task.md
 walkthrough.md
+AWS_SETUP_RUNBOOK.md
+LAUNCH_VIDEO_SCRIPT.md
+PRE_DEPLOYMENT_CHECKLIST.md 
