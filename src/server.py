@@ -5,7 +5,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -18,37 +18,60 @@ from src.indexer.git_manager import git_manager
 from src.api.webhooks import webhook_router
 from src.tools.hybrid_search import HybridRetriever, get_hybrid_retriever
 from src.tools.dependency_graph import PersistentDependencyGraph
+from src.auth import verify_api_key, verify_admin_key, create_api_key, list_api_keys, revoke_api_key
 
 logger = setup_m5_logger("m5.server")
 
-# ── Feature flags (read from environment) ───────────────────────────────────
+# ── Feature flags ─────────────────────────────────────────────────────────────
 DEV_AGENT_MODE = os.getenv("M5_ENABLE_DEV_AGENT_MODE", "false").lower() == "true"
 ADMIN_KEY = os.getenv("M5_ADMIN_KEY", "")
 
-# ── Startup warning when dev mode is on ─────────────────────────────────────
 if DEV_AGENT_MODE:
     logger.warning("Dev agent mode is ON — M5 is invoking its own LLM. Do not enable in production.")
 
-# ── Initialize FastAPI ───────────────────────────────────────────────────────
+if not ADMIN_KEY:
+    logger.warning(
+        "M5_ADMIN_KEY is not set in .env — admin endpoints and webhook security are disabled. "
+        "Set a strong random value before sharing M5 with anyone."
+    )
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Plain English: who is allowed to call M5 from a browser?
+# By default, only localhost (your own machine). You can add more origins in .env:
+#   M5_CORS_ORIGINS=https://yourdashboard.com,https://app.yourcompany.com
+_raw_origins = os.getenv("M5_CORS_ORIGINS", "")
+if _raw_origins.strip():
+    CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+else:
+    # Safe default: only local origins. Never allow "*" in production.
+    CORS_ORIGINS = [
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
+
+# ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="M5 v2 Context Engine API",
     description=(
-        "A compliance-grade, permission-aware context engine. "
+        "A permission-aware code context engine. "
         "M5 retrieves and proves; it does not reason or answer by default."
     ),
-    version="3.0.0"
+    version="3.1.0"
 )
 
-# ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
-# ── Request Logging Middleware ───────────────────────────────────────────────
+# ── Request logging ───────────────────────────────────────────────────────────
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -57,6 +80,7 @@ async def log_requests(request: Request, call_next):
     path = request.url.path
     if path not in ("/health", "/ready"):
         logger.info(f"{request.method} {path} -> status={response.status_code} elapsed={duration_ms}ms")
+    response.headers["X-Process-Time"] = f"{duration_ms}ms"
     return response
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -65,28 +89,36 @@ app.include_router(webhook_router)
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 class IndexRequest(BaseModel):
     workspace_root: str = "."
-    org_id: str = Field(default="default_org", description="Enterprise organization identifier")
-    dept_id: str = Field(default="default_dept", description="Department / team namespace")
-    repo_id: str = Field(default="default_repo", description="Repository identifier")
-    async_embedding: bool = Field(default=True, description="Enable non-blocking background vector embedding")
-
-class GitIndexRequest(BaseModel):
-    repo_url: str = Field(..., description="GitHub/GitLab repository URL")
-    branch: Optional[str] = Field(default=None, description="Optional branch or tag name")
-    access_token: Optional[str] = Field(default=None, description="Optional personal access token for private repos")
-    dept_id: str = Field(default="engineering", description="Department / team namespace")
-    async_embedding: bool = Field(default=True, description="Enable non-blocking background vector embedding")
-
-class ContextRequest(BaseModel):
-    query: str = Field(..., description="Natural language query or code snippet to search for")
-    top_k: int = Field(default=5, description="Number of top code chunks to retrieve")
-    expand_dependencies: bool = Field(default=True, description="Also fetch imports/dependencies of matched files")
-    expand_depth: int = Field(default=1, description="How many hops deep to expand dependencies (1 or 2)")
-    max_chunk_chars: Optional[int] = Field(default=None, description="Optional snippet limit. Defaults to full AST method/class body.")
     org_id: str = Field(default="default_org")
     dept_id: str = Field(default="default_dept")
     repo_id: str = Field(default="default_repo")
-    requesting_user: Optional[str] = Field(default=None, description="Optional: human user identity")
+    async_embedding: bool = Field(default=True)
+
+class GitIndexRequest(BaseModel):
+    repo_url: str = Field(..., description="GitHub/GitLab repository URL")
+    branch: Optional[str] = Field(default=None)
+    access_token: Optional[str] = Field(default=None, description="PAT for private repos")
+    dept_id: str = Field(default="engineering")
+    async_embedding: bool = Field(default=True)
+
+class ContextRequest(BaseModel):
+    query: str = Field(..., description="Natural language query or code snippet")
+    top_k: int = Field(default=5)
+    expand_dependencies: bool = Field(default=True)
+    expand_depth: int = Field(default=1)
+    max_chunk_chars: Optional[int] = Field(default=None)
+    org_id: str = Field(default="default_org")
+    dept_id: str = Field(default="default_dept")
+    repo_id: str = Field(default="default_repo")
+    requesting_user: Optional[str] = Field(default=None)
+
+class CreateKeyRequest(BaseModel):
+    caller_name: str = Field(..., description="Human label: who / what is this key for?")
+    org_id: str = Field(default="default_org", description="Tenant org this key belongs to")
+    scopes: list = Field(default=["read", "context"])
+
+class RevokeKeyRequest(BaseModel):
+    key_id: str = Field(..., description="key_id returned when the key was created")
 
 # ── Static UI ─────────────────────────────────────────────────────────────────
 if os.path.exists("static"):
@@ -96,22 +128,56 @@ if os.path.exists("static"):
 def serve_ui():
     if os.path.exists("static/index.html"):
         return FileResponse("static/index.html")
-    return {"message": "M5 v2 Context Engine API is online. Access /docs for Swagger UI."}
+    return {"message": "M5 v2 Context Engine API is online. See /docs for Swagger UI."}
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
+# ── Lifecycle — smart startup ─────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    """Auto-index default workspace and vectorize 100% of codebase into Qdrant on startup."""
+    """
+    Smart startup — only re-indexes if the Git commit changed since last run.
+
+    Plain English:
+    - On first run: M5 reads all files, builds the index, saves the commit SHA.
+    - On later restarts: M5 checks the current commit. If it hasn't changed, it
+      skips re-indexing entirely (startup goes from ~60s to ~2s).
+    - If the commit changed (someone pushed code), it re-indexes only then.
+    """
     from src.tools.vector_search import get_shared_embedder, VectorStore
+    from src.indexer.progressive_indexer import _detect_git_commit
+
     logger.info("Initializing ONNX embedding model (BAAI/bge-small-en-v1.5)...")
     get_shared_embedder()
 
     workspace_root = os.getenv("WORKSPACE_ROOT", ".")
+    if os.path.exists("/workspace") and not os.path.exists(workspace_root):
+        workspace_root = "/workspace"
+
     org_id = os.getenv("DEFAULT_ORG_ID", "default_org")
     dept_id = os.getenv("DEFAULT_DEPT_ID", "default_dept")
     repo_id = os.getenv("DEFAULT_REPO_ID", "default_repo")
 
-    logger.info(f"Parsing & Vectorizing workspace '{workspace_root}' into Qdrant...")
+    # Check what commit was last indexed
+    current_commit = _detect_git_commit(workspace_root)
+    existing_status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+    last_commit = existing_status.get("commit_sha")
+    already_indexed = existing_status.get("total_blocks", 0) > 0
+
+    if already_indexed and current_commit and current_commit == last_commit:
+        logger.info(
+            f"Skipping re-index: workspace '{workspace_root}' is up-to-date at commit {current_commit[:8]}. "
+            f"({existing_status['total_blocks']} blocks already indexed)"
+        )
+        logger.info("M5 v2 Context Engine Server Online on port 8000.")
+        return
+
+    if already_indexed and current_commit and last_commit and current_commit != last_commit:
+        logger.info(
+            f"Commit changed ({last_commit[:8] if last_commit else 'unknown'} → {current_commit[:8]}). "
+            f"Re-indexing workspace '{workspace_root}'..."
+        )
+    else:
+        logger.info(f"First-time indexing workspace '{workspace_root}'...")
+
     files_count, blocks = progressive_indexer.tier0_instant_boot(
         workspace_root=workspace_root,
         org_id=org_id,
@@ -122,7 +188,7 @@ def startup_event():
     if blocks:
         v_store = VectorStore(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
         indexed_count = v_store.index_blocks(blocks, batch_size=64)
-        logger.info(f"Qdrant Vectorization Complete: {indexed_count} AST blocks permanently indexed.")
+        logger.info(f"Qdrant vectorization complete: {indexed_count} AST blocks indexed.")
 
     logger.info("M5 v2 Context Engine Server Online on port 8000.")
 
@@ -130,29 +196,77 @@ def startup_event():
 # ── Health & Readiness ────────────────────────────────────────────────────────
 @app.get("/health")
 def health_check():
+    """Unauthenticated — used by load balancers and uptime monitors."""
     return {
         "status": "online",
         "engine": "M5 v2 Context Engine",
-        "version": "3.0.0",
-        "dev_agent_mode": DEV_AGENT_MODE
+        "version": "3.1.0",
+        "dev_agent_mode": DEV_AGENT_MODE,
     }
 
 @app.get("/ready")
 def readiness_check():
-    """Readiness probe checking storage and indexing status."""
-    return {
-        "status": "ready",
-        "engine": "M5 v2 Context Engine",
-        "version": "3.0.0",
-        "storage": "ok"
-    }
+    """Unauthenticated — Kubernetes readiness probe."""
+    return {"status": "ready", "engine": "M5 v2 Context Engine", "version": "3.1.0", "storage": "ok"}
 
-# ── Remote HTTP MCP Endpoint (JSON-RPC 2.0) ──────────────────────────────────
-@app.post("/mcp")
+
+# ── Admin: API Key Management ─────────────────────────────────────────────────
+# Plain English: these three endpoints let you create, list, and revoke API keys.
+# They require your M5_ADMIN_KEY from .env — not a regular API key.
+
+@app.post("/api/admin/keys", dependencies=[Depends(verify_admin_key)])
+def admin_create_key(req: CreateKeyRequest):
+    """
+    Creates a new API key.
+    Returns the raw key ONCE — save it immediately. It cannot be recovered later.
+
+    Usage:
+      curl -X POST http://localhost:8000/api/admin/keys \\
+           -H "Authorization: Bearer <M5_ADMIN_KEY>" \\
+           -H "Content-Type: application/json" \\
+           -d '{"caller_name": "Alice - Claude Code", "org_id": "acme"}'
+    """
+    return create_api_key(
+        caller_name=req.caller_name,
+        org_id=req.org_id,
+        scopes=req.scopes,
+    )
+
+@app.get("/api/admin/keys", dependencies=[Depends(verify_admin_key)])
+def admin_list_keys():
+    """
+    Lists all API keys (without the raw key — only metadata).
+
+    Usage:
+      curl http://localhost:8000/api/admin/keys \\
+           -H "Authorization: Bearer <M5_ADMIN_KEY>"
+    """
+    return {"keys": list_api_keys()}
+
+@app.delete("/api/admin/keys/{key_id}", dependencies=[Depends(verify_admin_key)])
+def admin_revoke_key(key_id: str):
+    """
+    Revokes an API key by key_id. The key stops working immediately.
+
+    Usage:
+      curl -X DELETE http://localhost:8000/api/admin/keys/kid_abc123 \\
+           -H "Authorization: Bearer <M5_ADMIN_KEY>"
+    """
+    found = revoke_api_key(key_id)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Key '{key_id}' not found.")
+    return {"status": "revoked", "key_id": key_id}
+
+
+# ── Remote HTTP MCP Endpoint ──────────────────────────────────────────────────
+@app.post("/mcp", dependencies=[Depends(verify_api_key)])
 async def mcp_http_endpoint(request: Request):
     """
     Remote HTTP MCP transport (JSON-RPC 2.0).
-    Usable by Copilot, Claude Code, ChatGPT, Cursor, and any HTTP MCP client.
+    Used by Copilot, Claude Code, ChatGPT, Cursor.
+
+    Plain English: Your AI editor sends a JSON-RPC message here.
+    M5 looks up your code and sends back the relevant chunks.
     """
     from src.mcp_server import mcp_server
     try:
@@ -168,25 +282,26 @@ async def mcp_http_endpoint(request: Request):
     api_key = None
     if auth_header.lower().startswith("bearer "):
         api_key = auth_header[7:].strip()
-    elif auth_header.startswith("m5_"):
-        api_key = auth_header.strip()
 
     response = mcp_server.handle_request(req_json, api_key_override=api_key)
     if response is None:
         return {"jsonrpc": "2.0", "result": None}
     return response
 
-# ── Indexing ──────────────────────────────────────────────────────────────────
-@app.get("/api/index/status")
+
+# ── Indexing (admin-only) ─────────────────────────────────────────────────────
+@app.get("/api/index/status", dependencies=[Depends(verify_admin_key)])
 def index_status_endpoint(
     org_id: str = "default_org",
     dept_id: str = "default_dept",
     repo_id: str = "default_repo"
 ):
+    """Returns current indexing progress for a tenant namespace."""
     return progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
 
-@app.post("/api/index")
+@app.post("/api/index", dependencies=[Depends(verify_admin_key)])
 def index_endpoint(req: IndexRequest):
+    """Indexes a local directory. Admin-only."""
     if not os.path.exists(req.workspace_root):
         raise HTTPException(status_code=400, detail=f"Path '{req.workspace_root}' does not exist.")
 
@@ -199,16 +314,13 @@ def index_endpoint(req: IndexRequest):
 
     if req.async_embedding:
         progressive_indexer.start_background_embedding(
-            blocks=blocks,
-            org_id=req.org_id,
-            dept_id=req.dept_id,
-            repo_id=req.repo_id
+            blocks=blocks, org_id=req.org_id, dept_id=req.dept_id, repo_id=req.repo_id
         )
-        msg = f"Tier-0 catalog built in <1s. Background embedding queued for {len(blocks)} blocks."
+        msg = f"Tier-0 catalog built. Background embedding queued for {len(blocks)} blocks."
     else:
         retriever = get_hybrid_retriever(org_id=req.org_id, dept_id=req.dept_id, repo_id=req.repo_id)
         retriever.index_blocks(blocks)
-        msg = f"Synchronously indexed {len(blocks)} blocks into Graph and Vector Stores."
+        msg = f"Indexed {len(blocks)} blocks."
 
     return {
         "status": "success",
@@ -218,12 +330,12 @@ def index_endpoint(req: IndexRequest):
         "workspace_root": req.workspace_root,
         "files_cataloged": file_count,
         "blocks_extracted": len(blocks),
-        "message": msg
+        "message": msg,
     }
 
-@app.post("/api/index/git")
+@app.post("/api/index/git", dependencies=[Depends(verify_admin_key)])
 def git_index_endpoint(req: GitIndexRequest):
-    """Clones any remote GitHub/GitLab repository URL and indexes it."""
+    """Clones a GitHub/GitLab repository and indexes it. Admin-only."""
     try:
         dest_folder, org_id, repo_id = git_manager.clone_or_pull(
             repo_url=req.repo_url,
@@ -242,14 +354,12 @@ def git_index_endpoint(req: GitIndexRequest):
 
     if req.async_embedding:
         progressive_indexer.start_background_embedding(
-            blocks=blocks,
-            org_id=org_id,
-            dept_id=req.dept_id,
-            repo_id=repo_id
+            blocks=blocks, org_id=org_id, dept_id=req.dept_id, repo_id=repo_id
         )
         msg = (
-            f"Cloned '{req.repo_url}'. Tier-0 catalog ready "
-            f"({file_count} files, {len(blocks)} blocks). Background vector embedding queued."
+            f"Cloned '{req.repo_url}'. "
+            f"Tier-0 catalog ready ({file_count} files, {len(blocks)} blocks). "
+            f"Background vector embedding queued."
         )
     else:
         retriever = get_hybrid_retriever(org_id=org_id, dept_id=req.dept_id, repo_id=repo_id)
@@ -265,15 +375,19 @@ def git_index_endpoint(req: GitIndexRequest):
         "local_path": dest_folder,
         "files_cataloged": file_count,
         "blocks_extracted": len(blocks),
-        "message": msg
+        "message": msg,
     }
 
-# ── Core Context Endpoint (the flagship) ──────────────────────────────────────
-@app.post("/api/context")
+
+# ── Core Context Endpoint (authenticated) ────────────────────────────────────
+@app.post("/api/context", dependencies=[Depends(verify_api_key)])
 def context_endpoint(req: ContextRequest):
     """
-    One call → ranked + graph-expanded context bundle.
-    This is the primary integration surface for any LLM that isn't already an MCP client.
+    The flagship M5 call: one request → ranked chunks + dependency graph.
+    Requires a valid API key (or admin key).
+
+    Plain English: Your application asks "where is the payment retry logic?"
+    M5 finds the exact functions, their files, and line numbers, and returns them.
     """
     from src.context.context_engine import get_context
 
@@ -291,19 +405,20 @@ def context_endpoint(req: ContextRequest):
     )
     return bundle
 
-# ── Customizations (skills / rules) ──────────────────────────────────────────
-@app.get("/api/customizations/rules")
+
+# ── Customizations (authenticated) ───────────────────────────────────────────
+@app.get("/api/customizations/rules", dependencies=[Depends(verify_api_key)])
 def customizations_rules_endpoint():
     from src.parser.customizations import customization_manager
     rules = customization_manager.load_rules()
     return {"rules": rules, "has_rules": bool(rules)}
 
-@app.get("/api/customizations/skills")
+@app.get("/api/customizations/skills", dependencies=[Depends(verify_api_key)])
 def customizations_skills_endpoint():
     from src.parser.customizations import customization_manager
     return {"skills": customization_manager.list_skills()}
 
-@app.get("/api/customizations/skills/{skill_name}")
+@app.get("/api/customizations/skills/{skill_name}", dependencies=[Depends(verify_api_key)])
 def customizations_skill_detail_endpoint(skill_name: str):
     from src.parser.customizations import customization_manager
     return customization_manager.load_skill(skill_name)

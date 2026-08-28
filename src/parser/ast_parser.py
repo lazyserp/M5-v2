@@ -67,10 +67,20 @@ class ASTParser:
         
         try:
             lang_module = importlib.import_module(module_name)
-            return Language(lang_module.language())
-        except ImportError:
+            if clean_name == "typescript":
+                fn = getattr(lang_module, "language_typescript", None) or getattr(lang_module, "language", None)
+                if fn:
+                    return Language(fn())
+            elif clean_name == "tsx":
+                fn = getattr(lang_module, "language_tsx", None) or getattr(lang_module, "language", None)
+                if fn:
+                    return Language(fn())
+            elif hasattr(lang_module, "language"):
+                return Language(lang_module.language())
+            raise AttributeError(f"No suitable language function found in {module_name}")
+        except Exception as e:
             raise ImportError(
-                f"[ERROR] Tree-sitter grammar '{module_name}' is not installed.\n"
+                f"[ERROR] Tree-sitter grammar '{module_name}' could not be loaded: {e}\n"
                 f"Run 'pip install {module_name}' to enable parsing for '{lang_name}' files."
             )
 

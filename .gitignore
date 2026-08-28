@@ -1,7 +1,64 @@
-.agents
-implementation_plan.md
+# ==============================================================================
+# M5 v2 Git Ignore Configuration
+# ==============================================================================
+
+# ── Secrets, Credentials & Environment Files ───────────────────────────────────
 .env
-*.pyc/
-__pycache__/
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cert
+secrets/
+
+# ── Authentication, Customer Keys & Persistent Storage ────────────────────────
+keys.json
+keys.json.*
+storage/
+storage/**
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Vector Database Storage & Snapshots ───────────────────────────────────────
 .qdrant_storage
 qdrant_storage/
+qdrant_storage/**
+qdrant_data/
+*.snapshot
+*.tar.gz
+
+# ── Local IDE, Editor & Live MCP Configuration ────────────────────────────────
+.vscode/*
+!.vscode/mcp.json.example
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Python Bytecode, Caches & Test Artifacts ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+build/
+dist/
+*.egg-info/
+
+# ── Cloned Customer Repositories & Temporary Files ────────────────────────────
+tmp/
+temp/
+logs/
+*.log
+
+# ── Agent System Internal Workspaces ──────────────────────────────────────────
+.agents/
+implementation_plan.md
+task.md
+walkthrough.md

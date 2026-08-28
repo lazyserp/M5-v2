@@ -36,6 +36,21 @@ def sanitize_collection_name(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", name.lower().strip())
     return cleaned if cleaned else "m5_default"
 
+def _try_local_qdrant(norm_path: str) -> Optional[QdrantClient]:
+    """
+    Attempts to open a local Qdrant storage folder.
+    Falls back to in-memory mode if disk storage is locked or incompatible.
+    """
+    try:
+        client = QdrantClient(path=norm_path, check_compatibility=False)
+        client.get_collections()
+        return client
+    except Exception:
+        return None
+
+
+_IN_MEMORY_CLIENT: Optional[QdrantClient] = None
+
 def get_shared_qdrant_client(
     storage_path: str = "./qdrant_storage",
     url: Optional[str] = None,
@@ -44,15 +59,20 @@ def get_shared_qdrant_client(
 ) -> QdrantClient:
     """
     Returns a shared Qdrant client, managing singletons for embedded local disk storage
-    to prevent file lock contention across threads and workers.
+    or shared in-memory storage to prevent file lock contention and preserve vectors.
     """
+    global _IN_MEMORY_CLIENT
+
     if in_memory:
-        return QdrantClient(location=":memory:", check_compatibility=False)
+        with _CLIENT_LOCK:
+            if _IN_MEMORY_CLIENT is None:
+                _IN_MEMORY_CLIENT = QdrantClient(location=":memory:", check_compatibility=False)
+            return _IN_MEMORY_CLIENT
 
     target_url = url or os.getenv("QDRANT_URL") or QDRANT_URL
     target_api_key = api_key or os.getenv("QDRANT_API_KEY") or QDRANT_API_KEY
 
-    # Try configured URL, then try Docker internal hostname, then localhost
+    # Try configured URL, then Docker internal hostname, then localhost
     candidate_urls = []
     if target_url:
         candidate_urls.append(target_url)
@@ -69,16 +89,17 @@ def get_shared_qdrant_client(
         except Exception:
             continue
 
-    # Thread-safe client reuse for local disk storage
+    # Thread-safe client reuse for local disk storage (with shared in-memory fallback)
     with _CLIENT_LOCK:
         norm_path = os.path.abspath(storage_path)
         if norm_path not in _CLIENT_CACHE:
-            try:
-                _CLIENT_CACHE[norm_path] = QdrantClient(path=norm_path, check_compatibility=False)
-            except Exception as e:
-                import sys
-                sys.stderr.write(f"[!] Warning: Local Qdrant folder '{norm_path}' locked by another process ({e}). Falling back to in-memory client.\n")
-                return QdrantClient(location=":memory:", check_compatibility=False)
+            local_client = _try_local_qdrant(norm_path)
+            if local_client is None:
+                if _IN_MEMORY_CLIENT is None:
+                    _IN_MEMORY_CLIENT = QdrantClient(location=":memory:", check_compatibility=False)
+                _CLIENT_CACHE[norm_path] = _IN_MEMORY_CLIENT
+            else:
+                _CLIENT_CACHE[norm_path] = local_client
         return _CLIENT_CACHE[norm_path]
 
 class VectorStore:
@@ -167,10 +188,12 @@ class VectorStore:
         blocks_to_index = [b for pid, b in block_id_map.items() if pid not in existing_ids]
 
         if not blocks_to_index:
-            print(f"[+] Qdrant Cache Hit: All {len(blocks)} AST blocks already vectorized on disk. 0ms re-indexing required.", flush=True)
+            import sys
+            sys.stderr.write(f"[+] Qdrant Cache Hit: All {len(blocks)} AST blocks already vectorized. 0ms re-indexing required.\n")
             return len(blocks)
 
-        print(f"[+] Qdrant Incremental Indexing: {len(existing_ids)} cached, {len(blocks_to_index)} new/modified blocks to vectorize...", flush=True)
+        import sys
+        sys.stderr.write(f"[+] Qdrant Incremental Indexing: {len(existing_ids)} cached, {len(blocks_to_index)} new/modified blocks to vectorize...\n")
 
         total_indexed = 0
         total_to_index = len(blocks_to_index)
@@ -202,7 +225,7 @@ class VectorStore:
 
             self.client.upsert(collection_name=self.collection_name, points=points)
             total_indexed += len(batch)
-            print(f"[+] Qdrant Vectorizing: {total_indexed}/{total_to_index} new blocks indexed ({int(total_indexed / total_to_index * 100)}%)...", flush=True)
+            sys.stderr.write(f"[+] Qdrant Vectorizing: {total_indexed}/{total_to_index} new blocks indexed ({int(total_indexed / total_to_index * 100)}%)...\n")
 
         return len(existing_ids) + total_indexed
 

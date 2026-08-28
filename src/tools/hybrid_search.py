@@ -1,8 +1,79 @@
+import gzip
+import json
 import math
+import os
 import re
 import threading
 from typing import List, Dict, Any, Optional, Tuple
 from src.tools.vector_search import VectorStore
+
+
+def _bm25_cache_dir() -> str:
+    """
+    Returns the directory where BM25 block snapshots are saved.
+    Uses the OS app-data folder so blocks never end up inside the Git working tree.
+    """
+    override = os.getenv("M5_BM25_CACHE_DIR", "")
+    if override:
+        path = override
+    else:
+        # Windows: %LOCALAPPDATA%\M5\bm25
+        # macOS/Linux: ~/.local/share/m5/bm25
+        if os.name == "nt":
+            base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        else:
+            base = os.path.join(os.path.expanduser("~"), ".local", "share")
+        path = os.path.join(base, "M5", "bm25")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _bm25_cache_path(org_id: str, dept_id: str, repo_id: str) -> str:
+    """Returns the full path for a tenant's BM25 block snapshot file."""
+    safe = f"{org_id}__{dept_id}__{repo_id}".replace("/", "_").replace("\\", "_")
+    return os.path.join(_bm25_cache_dir(), f"{safe}.blocks.json.gz")
+
+
+def _save_bm25_blocks(org_id: str, dept_id: str, repo_id: str, blocks: List[Dict[str, Any]]) -> None:
+    """
+    Saves the indexed code blocks to a gzip JSON file so BM25 can be restored after restarts.
+    Only stores the fields BM25 actually needs (name, file_path, content) to keep the file small.
+    Source code content is already on the user's disk — we're just saving the extracted text.
+    """
+    slim_blocks = [
+        {
+            "name": b.get("name", ""),
+            "file_path": b.get("file_path", ""),
+            "content": b.get("content", ""),
+            "start_line": b.get("start_line", 0),
+            "end_line": b.get("end_line", 0),
+            "type": b.get("type", ""),
+            "org_id": b.get("org_id", org_id),
+            "dept_id": b.get("dept_id", dept_id),
+            "repo_id": b.get("repo_id", repo_id),
+        }
+        for b in blocks
+    ]
+    cache_path = _bm25_cache_path(org_id, dept_id, repo_id)
+    tmp = cache_path + ".tmp"
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(slim_blocks, f)
+        os.replace(tmp, cache_path)
+    except Exception:
+        pass  # Never crash the indexer over a cache write failure
+
+
+def _load_bm25_blocks(org_id: str, dept_id: str, repo_id: str) -> List[Dict[str, Any]]:
+    """Loads previously saved BM25 blocks from disk. Returns [] if none exist."""
+    cache_path = _bm25_cache_path(org_id, dept_id, repo_id)
+    if not os.path.exists(cache_path):
+        return []
+    try:
+        with gzip.open(cache_path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
 class CodeTokenizer:
     """
@@ -134,6 +205,11 @@ class HybridRetriever:
     """
     Combines dense semantic vector retrieval (Qdrant) and sparse keyword retrieval (BM25)
     using Reciprocal Rank Fusion (RRF).
+
+    BM25 persistence:
+    On __init__, if a saved block snapshot exists for this tenant namespace, it is loaded
+    and the BM25 index is rebuilt from it (~200ms). This means keyword search works
+    immediately after a server restart without needing to re-parse the whole codebase.
     """
     def __init__(
         self,
@@ -156,10 +232,21 @@ class HybridRetriever:
         self.bm25_index = BM25Index()
         self.indexed_blocks: List[Dict[str, Any]] = []
 
+        # Restore BM25 from disk if a snapshot exists (survives restarts)
+        saved_blocks = _load_bm25_blocks(org_id, dept_id, repo_id)
+        if saved_blocks:
+            self.indexed_blocks = saved_blocks
+            self.bm25_index.index_blocks(saved_blocks)
+
     def index_blocks(self, blocks: List[Dict[str, Any]], batch_size: int = 64) -> int:
-        """Indexes blocks into both Dense Vector Store and BM25 Sparse Index."""
+        """
+        Indexes blocks into both Dense Vector Store (Qdrant) and BM25 Sparse Index.
+        Saves the updated block list to disk so BM25 survives the next restart.
+        """
         self.indexed_blocks.extend(blocks)
         self.bm25_index.index_blocks(self.indexed_blocks)
+        # Persist to disk — makes BM25 restart-proof
+        _save_bm25_blocks(self.org_id, self.dept_id, self.repo_id, self.indexed_blocks)
         return self.vector_store.index_blocks(blocks, batch_size=batch_size)
 
     def search_blocks(

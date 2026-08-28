@@ -1,15 +1,17 @@
+version: "3.8"
+
 services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: m5-qdrant
     restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333" # Qdrant REST API & Web Dashboard (http://localhost:6333/dashboard)
+      - "6334:6334" # Qdrant gRPC
     environment:
       - QDRANT__LOG_LEVEL=INFO
     volumes:
-      - qdrant_data:/qdrant/storage
+      - qdrant_storage:/qdrant/storage:z
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 3s
@@ -25,16 +27,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: m5-engine:v3.1
     container_name: m5-engine
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8000:8000" # M5 Context API & Remote MCP (http://localhost:8000/mcp)
+    env_file:
+      - .env
     environment:
       - QDRANT_URL=http://qdrant:6333
-      - WORKSPACE_ROOT=/workspace
       - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
     volumes:
+      - "./storage:/app/storage"
       - "${WORKSPACE_ROOT:-.}:/workspace"
     depends_on:
       qdrant:
@@ -46,6 +50,5 @@ services:
         max-file: "3"
 
 volumes:
-  qdrant_data:
+  qdrant_storage:
     driver: local
-

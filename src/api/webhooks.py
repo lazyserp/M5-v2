@@ -19,9 +19,29 @@ class WebhookSyncResponse(BaseModel):
     message: str
 
 def verify_github_signature(payload_bytes: bytes, signature_header: str | None) -> bool:
-    """Verifies HMAC SHA-256 signature from GitHub."""
+    """
+    Verifies HMAC SHA-256 signature from GitHub.
+
+    Fail-closed design:
+    - If GITHUB_WEBHOOK_SECRET is set (production):  signature MUST be valid.
+    - If GITHUB_WEBHOOK_SECRET is NOT set:
+        - Dev override M5_ALLOW_UNSIGNED_WEBHOOKS=true → allow (development only).
+        - Otherwise → REJECT. Prevents silent security hole on misconfigured deployments.
+    """
+    import os as _os
     if not WEBHOOK_SECRET:
-        return True # Secret optional in development
+        allow_unsigned = _os.getenv("M5_ALLOW_UNSIGNED_WEBHOOKS", "false").lower() == "true"
+        if allow_unsigned:
+            logger.warning(
+                "Accepting unsigned webhook (M5_ALLOW_UNSIGNED_WEBHOOKS=true). "
+                "Never use this in production."
+            )
+            return True
+        logger.error(
+            "Webhook rejected: GITHUB_WEBHOOK_SECRET is not configured. "
+            "Set it in .env or use M5_ALLOW_UNSIGNED_WEBHOOKS=true for local dev only."
+        )
+        return False
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     

@@ -123,8 +123,22 @@ class ProgressiveIndexer:
                             code_content = code_file.read()
 
                         lang = EXTENSION_MAP[ext]
-                        parser = ASTParser(language_name=lang)
-                        blocks = parser.parse_code(code_content)
+                        try:
+                            parser = ASTParser(language_name=lang)
+                            blocks = parser.parse_code(code_content)
+                        except Exception as parse_err:
+                            blocks = []
+
+                        # Fallback if no specific AST functions/classes found (e.g., top-level script, route definitions)
+                        if not blocks and code_content.strip():
+                            lines = code_content.splitlines()
+                            blocks = [{
+                                "type": "module",
+                                "name": os.path.basename(rel_path),
+                                "start_line": 1,
+                                "end_line": len(lines),
+                                "content": code_content[:4000]
+                            }]
 
                         for b in blocks:
                             b["file_path"] = rel_path

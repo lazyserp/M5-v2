@@ -2,6 +2,10 @@ import sys
 import json
 import os
 from typing import Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
 from src.tools.hybrid_search import HybridRetriever, get_hybrid_retriever
 from src.tools.dependency_graph import PersistentDependencyGraph
 from src.tools.line_reader import read_file_lines
@@ -11,6 +15,26 @@ from src.indexer.git_manager import git_manager
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "m5-context-engine"
 SERVER_VERSION = "3.0.0"
+
+def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
+    """Auto-indexes the workspace on boot if the index is currently empty."""
+    status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+    if status.get("total_blocks", 0) == 0:
+        workspace_root = os.getenv("WORKSPACE_ROOT", ".")
+        if os.path.exists("/workspace") and not os.path.exists(workspace_root):
+            workspace_root = "/workspace"
+        if os.path.exists(workspace_root):
+            files_count, blocks = progressive_indexer.tier0_instant_boot(
+                workspace_root=workspace_root,
+                org_id=org_id,
+                dept_id=dept_id,
+                repo_id=repo_id
+            )
+            if blocks:
+                from src.tools.vector_search import VectorStore
+                v_store = VectorStore(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+                v_store.index_blocks(blocks, batch_size=64)
+
 
 # ── Lean retrieval helper (no LLM / agent machinery) ─────────────────────────
 def get_retrieval_tools(
@@ -39,6 +63,7 @@ def get_retrieval_tools(
         except Exception:
             pass
 
+    _ensure_workspace_indexed(resolved_org, resolved_dept, resolved_repo)
     retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
     d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
     return retriever, d_graph
@@ -333,6 +358,7 @@ class MCPServer:
                 )
 
             elif tool_name == "m5_index_status":
+                _ensure_workspace_indexed(org_id, dept_id, repo_id)
                 status_dict = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
                 output = json.dumps(status_dict, indent=2)
 
@@ -362,7 +388,6 @@ class MCPServer:
                     "content": [{"type": "text", "text": output}]
                 }
             }
-
         except Exception as e:
             return {
                 "jsonrpc": "2.0",
@@ -370,28 +395,5 @@ class MCPServer:
                 "error": {"code": -32000, "message": f"Tool execution failed: {str(e)}"}
             }
 
-    def run_stdio(self):
-        """STDIO JSON-RPC 2.0 loop for local CLI / IDE clients."""
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line)
-                res = self.handle_request(req)
-                if res is not None:
-                    sys.stdout.write(json.dumps(res) + "\n")
-                    sys.stdout.flush()
-            except json.JSONDecodeError as e:
-                err_res = {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
-                }
-                sys.stdout.write(json.dumps(err_res) + "\n")
-                sys.stdout.flush()
-
 mcp_server = MCPServer()
 
-if __name__ == "__main__":
-    mcp_server.run_stdio()

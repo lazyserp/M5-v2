@@ -15,6 +15,7 @@ ONE call to get_context() does:
 import os
 import re
 import uuid
+import time
 from typing import Optional, List, Dict, Any
 
 from src.tools.hybrid_search import get_hybrid_retriever
@@ -112,6 +113,7 @@ def _make_bundle(
     omissions: List[str],
     warnings: List[str],
     truncated: bool,
+    elapsed_ms: float = 0.0,
 ) -> Dict[str, Any]:
     """Assemble the final rich ContextBundle dict."""
     total_text = " ".join(c.get("content", "") for c in chunks)
@@ -120,6 +122,7 @@ def _make_bundle(
     return {
         "request_id": request_id,
         "query": query,
+        "elapsed_ms": elapsed_ms,
         "chunks": chunks,
         "dependency_edges": dep_edges,
         "related_tests": related_tests,
@@ -181,6 +184,7 @@ def get_context(
     Returns:
         A ContextBundle dict with chunks, explicit dependency edges, test citations, omissions, and explainable scores.
     """
+    start_time = time.perf_counter()
     resolved_org = org_id or os.getenv("DEFAULT_ORG_ID", "default_org")
     resolved_dept = dept_id or os.getenv("DEFAULT_DEPT_ID", "default_dept")
     resolved_repo = repo_id or os.getenv("DEFAULT_REPO_ID", "default_repo")
@@ -317,6 +321,8 @@ def get_context(
     truncated = len(chunks) > _MAX_CHUNKS
     chunks = chunks[:_MAX_CHUNKS]
 
+    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
     # ── Step 6: Assemble ContextBundle ────────────────────────────────────────
     return _make_bundle(
         request_id=request_id,
@@ -327,4 +333,5 @@ def get_context(
         omissions=omissions,
         warnings=warnings,
         truncated=truncated,
+        elapsed_ms=elapsed_ms,
     )

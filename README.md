@@ -1,205 +1,112 @@
-# M5 v2 — Context Engine for Regulated Codebases
+# M5 v2 — Intelligent Code Context Engine
 
-**M5 is a pure context provider** — it finds and returns the right code to your AI. It does not reason or answer on its own.
-
-Built for engineering teams at regulated companies (fintech, healthcare, legal, government) where source code cannot leave the building, but developers still want Claude, Copilot, or an internal AI to reason well over the codebase.
+> **M5 is an invisible, permission-aware code context layer that plugs into AI tools developers already use.** Copilot, Claude Code, Cursor, and ChatGPT call M5 to retrieve precise, cited AST code chunks and dependency graphs from your repositories. **M5 supplies context; your AI produces the answer.**
 
 ---
 
-## How M5 fits in your stack
+## ⚡ 1-Minute Quickstart (Local Development)
 
+### 1. Configure `.env`
+```powershell
+Copy-Item .env.example .env
 ```
-┌──────────────────────────────────────────────────────────┐
-│                  Your Company's Perimeter                │
-│                                                          │
-│   ┌──────────────┐    MCP / REST    ┌────────────────┐  │
-│   │  Your        │ ◄──────────────► │   M5 v2        │  │
-│   │  AI of       │   context only   │   (runs here,  │  │
-│   │  choice      │                  │   air-gapped)  │  │
-│   │  (Claude,    │                  └───────┬────────┘  │
-│   │  Copilot,    │                          │           │
-│   │  internal)   │                  ┌───────▼────────┐  │
-│   └──────────────┘                  │  Your Codebase │  │
-│                                     └────────────────┘  │
-│                                                          │
-│   ✅ M5 never sends code to external APIs               │
-│   ✅ M5 never reasons or answers on its own             │
-│   ✅ Every retrieval is audit-logged                    │
-└──────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🌟 Core Capabilities
-
-### Retrieval (the product)
-
-| Feature | What it does |
-|---------|-------------|
-| **Hybrid Search** | BM25 keyword + dense vector embeddings fused with Reciprocal Rank Fusion |
-| **Bundled `get_context`** | One call → ranked chunks + dependency graph expansion + dedup |
-| **Dependency Graph** | SQLite-backed, maps imports/exports across the whole codebase |
-| **Progressive Indexing** | Tier-0 instant boot (<1s via AST), Tier-1/2 async vector embedding |
-| **Git URL Ingestion** | Shallow-clones any GitHub/GitLab repo and indexes it immediately |
-| **Real-Time Webhook Sync** | HMAC-verified GitHub push webhook syncs diffs in <200ms |
-
-### Compliance (the differentiator)
-
-| Feature | What it does |
-|---------|-------------|
-| **Audit Log** | Every retrieval is immutably logged with exact file paths + line ranges returned |
-| **API Keys** | Per-caller keys with repo-scoped access; stored as salted hashes (never plaintext) |
-| **Denied-request logging** | Failed / out-of-scope requests are also logged — often more interesting to security teams |
-| **ACL Hook** | `PermissionChecker` stub ready for Okta/Azure AD group sync |
-| **Multi-Tenant Isolation** | Strict `(org_id, dept_id, repo_id)` namespacing; proven by automated tests |
-| **Usage Reporting** | Token savings reports — M5 sends only relevant chunks, not whole files |
-
-### Integration surfaces
-
-| Surface | Use case |
-|---------|---------|
-| `POST /api/context` | Primary REST endpoint for any LLM integration |
-| MCP tool `m5_get_context` | Native Cursor / Claude Desktop / Antigravity IDE integration |
-| `GET /api/audit/query` | Compliance team review dashboard |
-| `GET /api/audit/export` | SIEM ingestion (Splunk, Datadog, etc.) |
-| `POST /api/admin/keys` | API key lifecycle management |
-
----
-
-## 🚀 Quickstart
-
-### 1. Install
-
-```bash
-git clone https://github.com/your-org/m5-v2.git
-cd m5-v2
-
-python -m venv venv
-# Windows:
-.\\venv\\Scripts\\activate
-# Linux/macOS:
-source venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-### 2. Configure (`.env`)
-
+Ensure your `.env` contains your target repository path:
 ```env
-# Admin key — required to create API keys and access audit logs
-M5_ADMIN_KEY=your_strong_admin_secret
-
-# Optional: MCP API key (used when running as Claude Desktop / Cursor MCP server)
-# M5_MCP_API_KEY=m5_yourkey...
-
-# Dev/Demo only — enables M5's own LLM agent loop (NOT for production)
-# M5_ENABLE_DEV_AGENT_MODE=false
+M5_ADMIN_KEY=m5_admin_1ad80533d21d9cec14f3ddb12859a7d0562954efc95c9f08
+WORKSPACE_ROOT=D:\your-project\backend
+QDRANT_URL=http://qdrant:6333
 ```
 
-### 3. Start the server
-
-```bash
-python -m uvicorn src.server:app --host 0.0.0.0 --port 8000
+### 2. Start M5 with Docker Compose
+```powershell
+docker compose up --build -d
 ```
-
-### 4. Create an API key
-
-```bash
-curl -X POST "http://localhost:8000/api/admin/keys" \
-     -H "Authorization: Bearer your_strong_admin_secret" \
-     -H "Content-Type: application/json" \
-     -d '{"caller_name": "Claude Desktop - Alice", "org_id": "acme", "scopes": ["*"]}'
-```
-
-Save the returned `key` — it is shown only once.
-
-### 5. Index a repository
-
-```bash
-curl -X POST "http://localhost:8000/api/index/git" \
-     -H "Content-Type: application/json" \
-     -d '{"repo_url": "https://github.com/psf/requests", "dept_id": "core_infra"}'
-```
-
-### 6. Fetch context
-
-```bash
-curl -X POST "http://localhost:8000/api/context" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "query": "Where is the HTTP session adapter defined?",
-       "org_id": "psf",
-       "dept_id": "core_infra",
-       "repo_id": "requests",
-       "expand_dependencies": true
-     }'
-```
+- **M5 Context Engine**: `http://localhost:8000`
+- **Remote MCP Endpoint**: `http://localhost:8000/mcp`
+- **Qdrant Web Dashboard**: `http://localhost:6333/dashboard`
+- **Interactive Swagger Docs**: `http://localhost:8000/docs`
 
 ---
 
-## 🔌 MCP Integration (Claude Desktop / Cursor)
+## 🔑 Create an API Key for Your IDE
 
-Add to your `claude_desktop_config.json` or `mcp_config.json`:
+Generate a client API key using your master `M5_ADMIN_KEY`:
 
+```powershell
+Invoke-RestMethod -Method POST `
+  -Uri "http://localhost:8000/api/admin/keys" `
+  -Headers @{
+    "Authorization" = "Bearer m5_admin_1ad80533d21d9cec14f3ddb12859a7d0562954efc95c9f08"
+    "Content-Type"  = "application/json"
+  } `
+  -Body '{"caller_name": "Developer - Copilot", "org_id": "default_org"}'
+```
+
+Save the returned key (e.g. `m5_live_1a22c5e1b1f2b9dc576f8382a4cf5e69bc683d244b1dafe5`).
+
+---
+
+## 🔌 Connect to Your AI Editor
+
+### VS Code / GitHub Copilot
+Create `.vscode/mcp.json` in your workspace:
 ```json
 {
-  "mcpServers": {
-    "m5-engine": {
-      "command": "python",
-      "args": ["-m", "src.mcp_server"],
-      "cwd": "/path/to/m5-v2",
-      "env": {
-        "M5_MCP_API_KEY": "m5_yourkey..."
+  "servers": {
+    "m5-context": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer m5_live_YOUR_KEY_HERE"
       }
     }
   }
 }
 ```
 
-Available MCP tools: `m5_get_context`, `m5_search_code`, `m5_read_lines`, `m5_get_dependencies`, `m5_get_dependents`, `m5_find_symbol_references`, `m5_index_git_repo`, `m5_index_status`.
+### Claude Desktop / Cursor
+Add to your Claude Desktop config (`%APPDATA%\Claude\claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "m5-context": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer m5_live_YOUR_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+Reload your IDE, open chat, and ask:
+> *"Where is the payment retry logic defined and what services call it?"*
+
+Your AI will automatically invoke `m5_get_context` and return exact, cited code lines.
 
 ---
 
-## 🔍 Audit & Compliance
+## 🏛️ Architecture & Deployment
 
-```bash
-# Query the audit log (who saw what, when)
-curl "http://localhost:8000/api/audit/query?org_id=acme&page=1" \
-     -H "Authorization: Bearer your_strong_admin_secret"
+M5 is structured around **2 clean models**:
+1. **Development Model**: Local Docker Compose (FastAPI + Qdrant Web UI).
+2. **Production Paying Model**: Hosted on AWS EC2 behind HTTPS with KMS encryption for paying clients.
 
-# Export full audit log as NDJSON (for SIEM ingestion)
-curl "http://localhost:8000/api/audit/export?org_id=acme" \
-     -H "Authorization: Bearer your_strong_admin_secret"
-
-# Token usage summary (last 30 days)
-curl "http://localhost:8000/api/usage/summary?org_id=acme&period=30d" \
-     -H "Authorization: Bearer your_strong_admin_secret"
-```
+📖 **Read the complete [DEPLOYMENT_GUIDE.md](file:///D:/M5%20v2/DEPLOYMENT_GUIDE.md) for full AWS production setup, security, and multi-tenant isolation.**
 
 ---
 
-## 🧪 Testing
+## 🛠️ REST API Reference
 
-```bash
-python -m pytest test/ -v
-```
-
-The test suite includes `test_tenant_isolation.py` — a hard gate that proves zero cross-tenant data leakage at the org, dept, and repo levels. This runs on every PR.
-
----
-
-## ⚗️ Experimental (Opt-In Only)
-
-The `experimental/` folder contains features that go beyond M5's core mission:
-
-- **Agent loop** — M5 running its own LLM to reason over code (duplicates what Claude/Cursor already does)
-- **File writing** — `write_to_file`, `replace_file_content`
-- **Shell execution** — `run_command`
-
-These are disabled by default. To enable for local demos:
-
-```env
-M5_ENABLE_DEV_AGENT_MODE=true
-```
-
-> ⚠️ Never enable in production. See `experimental/README.md` for details.
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/health` | `GET` | Public | Health check & uptime probe |
+| `/ready` | `GET` | Public | Kubernetes / load balancer readiness probe |
+| `/api/admin/keys` | `POST` | Admin Key | Create a new developer API key |
+| `/api/admin/keys` | `GET` | Admin Key | List active API keys |
+| `/api/admin/keys/{id}`| `DELETE` | Admin Key | Revoke an API key |
+| `/api/context` | `POST` | API Key | Query hybrid context bundle directly via JSON |
+| `/mcp` | `POST` | API Key | JSON-RPC 2.0 Remote MCP endpoint for AI editors |
+| `/api/index/status` | `GET` | Admin Key | Live indexing progress and block counts |
+| `/api/index/git` | `POST` | Admin Key | Clone & index a remote GitHub/GitLab repo |
+| `/api/webhooks/github`| `POST` | HMAC Secret | Sub-second delta sync on GitHub push events |
