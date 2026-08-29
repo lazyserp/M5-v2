@@ -69,8 +69,9 @@ def get_shared_qdrant_client(
                 _IN_MEMORY_CLIENT = QdrantClient(location=":memory:", check_compatibility=False)
             return _IN_MEMORY_CLIENT
 
-    target_url = url or os.getenv("QDRANT_URL") or QDRANT_URL
     target_api_key = api_key or os.getenv("QDRANT_API_KEY") or QDRANT_API_KEY
+    if target_api_key and not str(target_api_key).strip():
+        target_api_key = None
 
     # Try configured URL, then Docker internal hostname, then localhost
     candidate_urls = []
@@ -83,7 +84,11 @@ def get_shared_qdrant_client(
 
     for c_url in candidate_urls:
         try:
-            client = QdrantClient(url=c_url, api_key=target_api_key, timeout=2, check_compatibility=False)
+            # Only send API key if configured and relevant
+            client_kwargs = {"url": c_url, "timeout": 2, "check_compatibility": False}
+            if target_api_key:
+                client_kwargs["api_key"] = target_api_key
+            client = QdrantClient(**client_kwargs)
             client.get_collections()  # Active health probe
             return client
         except Exception:

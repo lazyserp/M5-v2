@@ -102,6 +102,7 @@ def create_api_key(
     return {
         "key_id": key_id,
         "key": raw_key,          # shown ONCE — user must save this
+        "api_key": raw_key,      # alias for client compatibility
         "caller_name": caller_name,
         "org_id": org_id,
         "scopes": scopes,
