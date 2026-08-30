@@ -72,48 +72,54 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing ONNX embedding model (BAAI/bge-small-en-v1.5)...")
     get_shared_embedder()
 
-    workspace_root = os.getenv("WORKSPACE_ROOT", ".")
-    if os.path.exists("/workspace") and not os.path.exists(workspace_root):
-        workspace_root = "/workspace"
+    auto_index = os.getenv("AUTO_INDEX", os.getenv("INDEX_ON_STARTUP", "true")).strip().lower() in ("true", "1", "yes")
 
-    org_id = os.getenv("DEFAULT_ORG_ID", "default_org")
-    dept_id = os.getenv("DEFAULT_DEPT_ID", "default_dept")
-    repo_id = os.getenv("DEFAULT_REPO_ID", "default_repo")
-
-    # Check what commit was last indexed
-    current_commit = _detect_git_commit(workspace_root)
-    existing_status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
-    last_commit = existing_status.get("commit_sha")
-    already_indexed = existing_status.get("total_blocks", 0) > 0
-
-    if already_indexed and current_commit and current_commit == last_commit:
-        logger.info(
-            f"Skipping re-index: workspace '{workspace_root}' is up-to-date at commit {current_commit[:8]}. "
-            f"({existing_status['total_blocks']} blocks already indexed)"
-        )
+    if not auto_index:
+        logger.info("Startup repository indexing skipped (AUTO_INDEX is disabled).")
         logger.info("M5 v2 Context Engine Server Online on port 8000.")
     else:
-        if already_indexed and current_commit and last_commit and current_commit != last_commit:
+        workspace_root = os.getenv("WORKSPACE_ROOT", ".")
+        if os.path.exists("/workspace") and not os.path.exists(workspace_root):
+            workspace_root = "/workspace"
+
+        org_id = os.getenv("DEFAULT_ORG_ID", "default_org")
+        dept_id = os.getenv("DEFAULT_DEPT_ID", "default_dept")
+        repo_id = os.getenv("DEFAULT_REPO_ID", "default_repo")
+
+        # Check what commit was last indexed
+        current_commit = _detect_git_commit(workspace_root)
+        existing_status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+        last_commit = existing_status.get("commit_sha")
+        already_indexed = existing_status.get("total_blocks", 0) > 0
+
+        if already_indexed and current_commit and current_commit == last_commit:
             logger.info(
-                f"Commit changed ({last_commit[:8] if last_commit else 'unknown'} → {current_commit[:8]}). "
-                f"Re-indexing workspace '{workspace_root}'..."
+                f"Skipping re-index: workspace '{workspace_root}' is up-to-date at commit {current_commit[:8]}. "
+                f"({existing_status['total_blocks']} blocks already indexed)"
             )
+            logger.info("M5 v2 Context Engine Server Online on port 8000.")
         else:
-            logger.info(f"First-time indexing workspace '{workspace_root}'...")
+            if already_indexed and current_commit and last_commit and current_commit != last_commit:
+                logger.info(
+                    f"Commit changed ({last_commit[:8] if last_commit else 'unknown'} → {current_commit[:8]}). "
+                    f"Re-indexing workspace '{workspace_root}'..."
+                )
+            else:
+                logger.info(f"First-time indexing workspace '{workspace_root}'...")
 
-        files_count, blocks = progressive_indexer.tier0_instant_boot(
-            workspace_root=workspace_root,
-            org_id=org_id,
-            dept_id=dept_id,
-            repo_id=repo_id
-        )
+            files_count, blocks = progressive_indexer.tier0_instant_boot(
+                workspace_root=workspace_root,
+                org_id=org_id,
+                dept_id=dept_id,
+                repo_id=repo_id
+            )
 
-        if blocks:
-            v_store = VectorStore(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
-            indexed_count = v_store.index_blocks(blocks, batch_size=64)
-            logger.info(f"Qdrant vectorization complete: {indexed_count} AST blocks indexed.")
+            if blocks:
+                v_store = VectorStore(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+                indexed_count = v_store.index_blocks(blocks, batch_size=64)
+                logger.info(f"Qdrant vectorization complete: {indexed_count} AST blocks indexed.")
 
-        logger.info("M5 v2 Context Engine Server Online on port 8000.")
+            logger.info("M5 v2 Context Engine Server Online on port 8000.")
 
     try:
         yield
