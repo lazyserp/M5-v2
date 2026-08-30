@@ -33,6 +33,31 @@ class GitRepoManager:
         # Fallback to generic naming if pattern doesn't match
         return "external_org", "git_repo"
 
+    @staticmethod
+    def detect_default_branch(target_url: str) -> Optional[str]:
+        """
+        Auto-detects the remote repository's default branch (e.g. master, main, develop)
+        using git ls-remote so callers don't have to guess.
+        """
+        try:
+            res = subprocess.run(
+                ["git", "ls-remote", "--symref", target_url, "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=15
+            )
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("ref: refs/heads/"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1].replace("refs/heads/", "")
+                    return parts[0].replace("ref: refs/heads/", "")
+        except Exception:
+            pass
+        return None
+
     def clone_or_pull(
         self,
         repo_url: str,
@@ -59,10 +84,15 @@ class GitRepoManager:
             except Exception:
                 pass
         else:
+            # Auto-detect default branch if not explicitly specified
+            effective_branch = branch
+            if not effective_branch:
+                effective_branch = self.detect_default_branch(target_url)
+
             # Shallow clone
             cmd = ["git", "clone", "--depth", "1"]
-            if branch:
-                cmd.extend(["-b", branch])
+            if effective_branch:
+                cmd.extend(["-b", effective_branch])
             cmd.extend([target_url, dest_folder])
 
             try:
