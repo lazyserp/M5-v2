@@ -60,23 +60,25 @@ class ProgressiveIndexer:
             status = self._statuses.get(key, IngestionStatus())
             commit = status.commit_sha or _detect_git_commit(status.workspace_root)
             
-            # Progress percentage
-            if status.is_indexing:
-                pct = round((status.indexed_blocks / status.total_blocks * 100), 1) if status.total_blocks > 0 else 0.0
+            # Progress calculation
+            total = status.total_blocks
+            indexed = min(status.indexed_blocks, total) if status.is_indexing else total
+            if status.is_indexing and total > 0:
+                pct = min(100.0, max(0.0, round((indexed / total * 100), 1)))
                 state = "indexing"
             else:
-                pct = 100.0 if status.total_blocks > 0 else 100.0
-                state = "ready" if status.total_blocks > 0 else "idle"
+                pct = 100.0 if total > 0 else 0.0
+                state = "ready" if total > 0 else "idle"
 
             return {
                 "org_id": org_id,
                 "dept_id": dept_id,
                 "repo_id": repo_id,
                 "status": state,
-                "is_fresh": not status.is_indexing and status.total_blocks > 0,
+                "is_fresh": not status.is_indexing and total > 0,
                 "total_files": status.total_files,
-                "total_blocks": status.total_blocks,
-                "indexed_blocks": status.indexed_blocks if status.is_indexing else status.total_blocks,
+                "total_blocks": total,
+                "indexed_blocks": indexed,
                 "is_indexing": status.is_indexing,
                 "progress_percentage": pct,
                 "commit_sha": commit,
@@ -164,7 +166,7 @@ class ProgressiveIndexer:
         with self._lock:
             status.total_files = file_count
             status.total_blocks = len(all_blocks)
-            status.indexed_blocks = len(all_blocks)
+            status.indexed_blocks = 0
             status.is_indexing = False
             status.last_indexed_at = datetime.now(timezone.utc).isoformat()
 
@@ -184,19 +186,31 @@ class ProgressiveIndexer:
         def _worker():
             key = self._get_status_key(org_id, dept_id, repo_id)
             retriever = get_hybrid_retriever(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+            total_blocks = len(blocks)
+            logger.info(f"Started background vector embedding for {total_blocks} blocks ({org_id}/{dept_id}/{repo_id})...")
             
             with self._lock:
                 if key in self._statuses:
                     self._statuses[key].is_indexing = True
+                    self._statuses[key].indexed_blocks = 0
 
             try:
-                for i in range(0, len(blocks), batch_size):
+                processed = 0
+                for i in range(0, total_blocks, batch_size):
                     batch = blocks[i : i + batch_size]
                     retriever.index_blocks(batch, batch_size=batch_size)
+                    processed += len(batch)
                     with self._lock:
                         if key in self._statuses:
-                            self._statuses[key].indexed_blocks += len(batch)
+                            self._statuses[key].indexed_blocks = processed
+                    
+                    if processed % (batch_size * 5) == 0 or processed == total_blocks:
+                        pct = (processed / total_blocks) * 100 if total_blocks > 0 else 100.0
+                        logger.info(f"Vector embedding progress: {processed}/{total_blocks} blocks ({pct:.1f}%)")
+                
+                logger.info(f"Vector embedding complete: all {total_blocks} blocks indexed successfully.")
             except Exception as e:
+                logger.error(f"Vector embedding background worker failed: {e}")
                 with self._lock:
                     if key in self._statuses:
                         self._statuses[key].last_error = str(e)
