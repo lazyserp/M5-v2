@@ -324,7 +324,7 @@ def get_context(
     elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
     # ── Step 6: Assemble ContextBundle ────────────────────────────────────────
-    return _make_bundle(
+    bundle = _make_bundle(
         request_id=request_id,
         query=query,
         chunks=chunks,
@@ -335,3 +335,25 @@ def get_context(
         truncated=truncated,
         elapsed_ms=elapsed_ms,
     )
+
+    try:
+        from src.audit.telemetry import log_retrieval_trace
+        transport = "mcp" if ("mcp" in caller_identity.lower() or caller_identity == "mcp/client") else "rest_api"
+        log_retrieval_trace(
+            query=query,
+            org_id=resolved_org,
+            dept_id=resolved_dept,
+            repo_id=resolved_repo,
+            requesting_user=requesting_user,
+            caller_identity=caller_identity,
+            top_k=top_k,
+            expand_dependencies=expand_dependencies,
+            duration_ms=elapsed_ms,
+            result_bundle=bundle,
+            transport=transport,
+        )
+    except Exception:
+        pass
+
+    return bundle
+

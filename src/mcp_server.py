@@ -1,6 +1,7 @@
 import sys
 import json
 import os
+import time
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -17,7 +18,13 @@ SERVER_NAME = "m5-context-engine"
 SERVER_VERSION = "3.0.0"
 
 def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
-    """Auto-indexes the workspace on boot if the index is currently empty."""
+    """Auto-indexes the default workspace on stdio boot if the default index is currently empty."""
+    default_org = os.getenv("DEFAULT_ORG_ID", "default_org")
+    default_dept = os.getenv("DEFAULT_DEPT_ID", "default_dept")
+    default_repo = os.getenv("DEFAULT_REPO_ID", "default_repo")
+    if (org_id, dept_id, repo_id) != (default_org, default_dept, default_repo):
+        return
+
     status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
     if status.get("total_blocks", 0) == 0:
         workspace_root = os.getenv("WORKSPACE_ROOT", ".")
@@ -215,13 +222,23 @@ class MCPServer:
     def __init__(self):
         self.running = True
         self.mcp_api_key = os.getenv("M5_MCP_API_KEY", "")
+        self.client_name = "mcp_client"
+        self.client_info = {}
 
-    def handle_request(self, request_json: Dict[str, Any], api_key_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def handle_request(
+        self,
+        request_json: Dict[str, Any],
+        api_key_override: Optional[str] = None,
+        caller_identity: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         req_id = request_json.get("id")
         method = request_json.get("method")
         params = request_json.get("params", {})
 
         if method == "initialize":
+            self.client_info = params.get("clientInfo", {})
+            if self.client_info and self.client_info.get("name"):
+                self.client_name = self.client_info.get("name")
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -248,7 +265,13 @@ class MCPServer:
         elif method == "tools/call":
             tool_name = params.get("name")
             args = params.get("arguments", {})
-            return self._execute_tool_call(req_id, tool_name, args, api_key_override=api_key_override)
+            return self._execute_tool_call(
+                req_id,
+                tool_name,
+                args,
+                api_key_override=api_key_override,
+                caller_identity=caller_identity
+            )
 
         else:
             return {
@@ -262,7 +285,8 @@ class MCPServer:
         req_id: Any,
         tool_name: str,
         args: Dict[str, Any],
-        api_key_override: Optional[str] = None
+        api_key_override: Optional[str] = None,
+        caller_identity: Optional[str] = None
     ) -> Dict[str, Any]:
         # Smart Namespace Fallback:
         default_org = os.getenv("DEFAULT_ORG_ID", "default_org")
@@ -290,7 +314,24 @@ class MCPServer:
             except Exception:
                 pass
 
-        caller_name = "mcp/client"
+        start_time = time.perf_counter()
+        transport = "mcp_http" if api_key_override else "mcp_stdio"
+        system_user = os.getenv("USERNAME") or os.getenv("USER") or "developer"
+
+        if caller_identity:
+            caller_name = caller_identity
+        elif api_key_override:
+            try:
+                from src.auth import _lookup_key, _get_admin_key
+                if api_key_override == _get_admin_key():
+                    caller_name = f"admin ({system_user})"
+                else:
+                    key_rec = _lookup_key(api_key_override)
+                    caller_name = key_rec.get("caller_name", f"api_user ({system_user})") if key_rec else f"api_user ({system_user})"
+            except Exception:
+                caller_name = f"api_user ({system_user})"
+        else:
+            caller_name = f"{system_user} ({self.client_name})"
 
         retriever, d_graph = get_retrieval_tools(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
 
@@ -307,7 +348,7 @@ class MCPServer:
                     org_id=org_id,
                     dept_id=dept_id,
                     repo_id=repo_id,
-                    requesting_user=args.get("requesting_user"),
+                    requesting_user=args.get("requesting_user") or caller_name,
                     caller_identity=caller_name,
                 )
                 output = json.dumps(bundle, indent=2)
@@ -381,6 +422,23 @@ class MCPServer:
                     "error": {"code": -32601, "message": f"Tool '{tool_name}' not recognized."}
                 }
 
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            try:
+                from src.audit.telemetry import log_mcp_tool_trace
+                log_mcp_tool_trace(
+                    tool_name=tool_name,
+                    args=args,
+                    output=output,
+                    duration_ms=duration_ms,
+                    caller_identity=caller_name,
+                    org_id=org_id,
+                    dept_id=dept_id,
+                    repo_id=repo_id,
+                    transport=transport,
+                )
+            except Exception:
+                pass
+
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -389,6 +447,23 @@ class MCPServer:
                 }
             }
         except Exception as e:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            try:
+                from src.audit.telemetry import log_mcp_tool_trace
+                log_mcp_tool_trace(
+                    tool_name=tool_name,
+                    args=args,
+                    output="",
+                    duration_ms=duration_ms,
+                    caller_identity=caller_name,
+                    org_id=org_id,
+                    dept_id=dept_id,
+                    repo_id=repo_id,
+                    transport=transport,
+                    error=str(e),
+                )
+            except Exception:
+                pass
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,

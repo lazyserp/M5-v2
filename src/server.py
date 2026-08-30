@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -115,7 +115,14 @@ async def lifespan(app: FastAPI):
 
         logger.info("M5 v2 Context Engine Server Online on port 8000.")
 
-    yield
+    try:
+        yield
+    finally:
+        try:
+            from src.audit.telemetry import flush_telemetry
+            flush_telemetry()
+        except Exception:
+            pass
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -262,8 +269,8 @@ def admin_revoke_key(key_id: str):
 
 
 # ── Remote HTTP MCP Endpoint ──────────────────────────────────────────────────
-@app.post("/mcp", dependencies=[Depends(verify_api_key)])
-async def mcp_http_endpoint(request: Request):
+@app.post("/mcp")
+async def mcp_http_endpoint(request: Request, key_info: Dict[str, Any] = Depends(verify_api_key)):
     """
     Remote HTTP MCP transport (JSON-RPC 2.0).
     Used by Copilot, Claude Code, ChatGPT, Cursor.
@@ -286,7 +293,8 @@ async def mcp_http_endpoint(request: Request):
     if auth_header.lower().startswith("bearer "):
         api_key = auth_header[7:].strip()
 
-    response = mcp_server.handle_request(req_json, api_key_override=api_key)
+    caller = key_info.get("caller_name", "mcp_http_client") if isinstance(key_info, dict) else "mcp_http_client"
+    response = mcp_server.handle_request(req_json, api_key_override=api_key, caller_identity=caller)
     if response is None:
         return {"jsonrpc": "2.0", "result": None}
     return response
@@ -383,8 +391,8 @@ def git_index_endpoint(req: GitIndexRequest):
 
 
 # ── Core Context Endpoint (authenticated) ────────────────────────────────────
-@app.post("/api/context", dependencies=[Depends(verify_api_key)])
-def context_endpoint(req: ContextRequest):
+@app.post("/api/context")
+def context_endpoint(req: ContextRequest, key_info: Dict[str, Any] = Depends(verify_api_key)):
     """
     The flagship M5 call: one request → ranked chunks + dependency graph.
     Requires a valid API key (or admin key).
@@ -393,6 +401,9 @@ def context_endpoint(req: ContextRequest):
     M5 finds the exact functions, their files, and line numbers, and returns them.
     """
     from src.context.context_engine import get_context
+
+    caller = key_info.get("caller_name", "api_user") if isinstance(key_info, dict) else "api_user"
+    user_name = req.requesting_user or caller
 
     bundle = get_context(
         query=req.query,
@@ -403,8 +414,8 @@ def context_endpoint(req: ContextRequest):
         org_id=req.org_id,
         dept_id=req.dept_id,
         repo_id=req.repo_id,
-        requesting_user=req.requesting_user,
-        caller_identity="api_user",
+        requesting_user=user_name,
+        caller_identity=caller,
     )
     return bundle
 

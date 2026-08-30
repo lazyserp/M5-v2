@@ -17,3 +17,9 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 # Retrieval Limits
 M5_MAX_CHUNKS = int(os.getenv("M5_MAX_CHUNKS", "15"))
 
+# Observability (Langfuse)
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+

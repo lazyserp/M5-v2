@@ -12,3 +12,4 @@ tree-sitter-typescript>=0.21.0
 tree-sitter-java>=0.21.0
 tree-sitter-cpp>=0.21.0
 pytest>=8.0.0
+langfuse>=2.0.0
