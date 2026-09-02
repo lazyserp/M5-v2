@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m5-engine"
+version = "1.0.0"
+description = "Intelligent, zero-overhead AST code context and dependency graph engine for AI coding agents,saving LLM token costs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Aman", email = "lazyserp@gmail.com" }
+]
+keywords = [
+    "mcp", "model-context-protocol", "ast", "code-graph",
+    "developer-tools", "ai-agents", "cursor", "claude-code", "copilot"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Libraries",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "tree-sitter>=0.20.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0"
+]
+
+[project.optional-dependencies]
+enterprise = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
+    "qdrant-client>=1.6.0",
+    "fastembed>=0.2.0"
+]
+
+[project.scripts]
+m5 = "src.cli.main:cli_entrypoint"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[project.urls]
+Homepage = "https://github.com/m5-context-engine/m5"
+Documentation = "https://github.com/m5-context-engine/m5#readme"
+Repository = "https://github.com/m5-context-engine/m5.git"
+Issues = "https://github.com/m5-context-engine/m5/issues"

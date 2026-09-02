@@ -6,6 +6,7 @@ from src.logger import setup_m5_logger
 from src.parser.ast_parser import ASTParser, EXTENSION_MAP
 from src.tools.hybrid_search import get_hybrid_retriever
 from src.tools.dependency_graph import PersistentDependencyGraph
+from src.indexer.gitignore import GitIgnoreFilter
 
 logger = setup_m5_logger("m5.indexer")
 
@@ -107,21 +108,21 @@ class ProgressiveIndexer:
             status.commit_sha = _detect_git_commit(workspace_root)
 
         d_graph = PersistentDependencyGraph(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+        ignore_filter = GitIgnoreFilter(workspace_root)
         all_blocks = []
         file_count = 0
-        ignore_dirs = {
-            ".git", "__pycache__", "venv", ".venv", "node_modules",
-            "qdrant_storage", "storage", "repos", "target", "dist", "build", ".pytest_cache"
-        }
 
         for root, dirs, files in os.walk(workspace_root):
-            dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs]
+            dirs[:] = [
+                d for d in dirs
+                if not ignore_filter.is_ignored(os.path.join(root, d), is_dir=True)
+            ]
 
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in EXTENSION_MAP:
+                full_file_path = os.path.join(root, f)
+                if ext in EXTENSION_MAP and not ignore_filter.is_ignored(full_file_path, is_dir=False):
                     file_count += 1
-                    full_file_path = os.path.join(root, f)
                     rel_path = os.path.relpath(full_file_path, workspace_root).replace("\\", "/")
                     try:
                         with open(full_file_path, "r", encoding="utf-8", errors="ignore") as code_file:

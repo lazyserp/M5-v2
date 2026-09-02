@@ -15,10 +15,16 @@ from src.indexer.git_manager import git_manager
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "m5-context-engine"
-SERVER_VERSION = "3.0.0"
+try:
+    from importlib.metadata import version as _get_pkg_ver
+    SERVER_VERSION = _get_pkg_ver("m5-engine")
+except Exception:
+    SERVER_VERSION = "1.0.0"
 
 def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
     """Auto-indexes the default workspace on stdio boot if the default index is currently empty."""
+    if os.getenv("M5_LOCAL_MODE") == "true":
+        return
     default_org = os.getenv("DEFAULT_ORG_ID", "default_org")
     default_dept = os.getenv("DEFAULT_DEPT_ID", "default_dept")
     default_repo = os.getenv("DEFAULT_REPO_ID", "default_repo")
@@ -58,7 +64,7 @@ def get_retrieval_tools(
     resolved_repo = repo_id or os.getenv("DEFAULT_REPO_ID", "default_repo")
 
     # If still pointing to default_org, check for single active collection in Qdrant
-    if resolved_org == "default_org" and resolved_repo == "default_repo":
+    if os.getenv("M5_LOCAL_MODE") != "true" and resolved_org == "default_org" and resolved_repo == "default_repo":
         try:
             from src.tools.vector_search import get_shared_qdrant_client
             client = get_shared_qdrant_client()
@@ -69,6 +75,10 @@ def get_retrieval_tools(
                     resolved_org, resolved_dept, resolved_repo = parts[0], parts[1], "_".join(parts[2:])
         except Exception:
             pass
+
+    if os.getenv("M5_LOCAL_MODE") == "true":
+        d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
+        return None, d_graph
 
     _ensure_workspace_indexed(resolved_org, resolved_dept, resolved_repo)
     retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
@@ -211,6 +221,29 @@ MCP_TOOLS_SCHEMA = [
             },
             "required": ["skill_name"]
         }
+    },
+    {
+        "name": "m5_get_test_impact",
+        "description": "Calculates the call-graph blast radius and companion unit/integration test files affected by changing a function or file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol_name": {"type": "string", "description": "The function/class name being modified"},
+                "file_path": {"type": "string", "description": "Optional path to the source file"}
+            },
+            "required": ["symbol_name"]
+        }
+    },
+    {
+        "name": "m5_cross_repo_search",
+        "description": "Searches across multiple federated microservice repositories for matching symbol definitions or API contracts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Symbol name or API route pattern to search across repos"}
+            },
+            "required": ["query"]
+        }
     }
 ]
 
@@ -302,7 +335,7 @@ class MCPServer:
         repo_id = default_repo if (not raw_repo or raw_repo == "default_repo") else raw_repo
 
         # If still default_org, check if there is an active non-default collection in Qdrant
-        if org_id == "default_org" and repo_id == "default_repo":
+        if os.getenv("M5_LOCAL_MODE") != "true" and org_id == "default_org" and repo_id == "default_repo":
             try:
                 from src.tools.vector_search import get_shared_qdrant_client
                 client = get_shared_qdrant_client()
@@ -357,7 +390,13 @@ class MCPServer:
             elif tool_name == "m5_search_code":
                 query = args.get("query", "")
                 top_k = args.get("top_k", 3)
-                output = retriever.search_code(query=query, top_k=top_k)
+                if retriever is not None:
+                    output = retriever.search_code(query=query, top_k=top_k)
+                else:
+                    from src.storage.local_db import LocalCodeGraphDB
+                    local_db = LocalCodeGraphDB()
+                    syms = local_db.search_fts(query, limit=top_k)
+                    output = json.dumps(syms, indent=2)
 
             # ── Line reader ───────────────────────────────────────────────
             elif tool_name == "m5_read_lines":
@@ -415,6 +454,19 @@ class MCPServer:
                 detail = customization_manager.load_skill(skill_name)
                 output = json.dumps(detail, indent=2)
 
+            elif tool_name == "m5_get_test_impact":
+                from src.tools.test_impact import test_impact_engine
+                sym = args.get("symbol_name", "")
+                f_path = args.get("file_path")
+                impact = test_impact_engine.calculate_blast_radius(symbol_name=sym, file_path=f_path)
+                output = json.dumps(impact, indent=2)
+
+            elif tool_name == "m5_cross_repo_search":
+                from src.tools.multi_repo_graph import multi_repo_graph
+                q = args.get("query", "")
+                results = multi_repo_graph.cross_repo_symbol_search(symbol_name=q)
+                output = json.dumps(results, indent=2)
+
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -471,4 +523,38 @@ class MCPServer:
             }
 
 mcp_server = MCPServer()
+
+def run_stdio():
+    """
+    Standard I/O JSON-RPC loop for local IDE MCP connections.
+    Listens on sys.stdin and responds on sys.stdout.
+    """
+    server = mcp_server
+    sys.stderr.write("[M5] Starting M5 MCP Server in STDIO mode...\n")
+    sys.stderr.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+            res = server.handle_request(req)
+            if res is not None:
+                sys.stdout.write(json.dumps(res) + "\n")
+                sys.stdout.flush()
+        except json.JSONDecodeError:
+            err_res = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error: Invalid JSON"}
+            }
+            sys.stdout.write(json.dumps(err_res) + "\n")
+            sys.stdout.flush()
+        except Exception as e:
+            sys.stderr.write(f"[M5 STDIO ERROR] {e}\n")
+            sys.stderr.flush()
+
+if __name__ == "__main__":
+    run_stdio()
 

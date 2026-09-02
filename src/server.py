@@ -138,7 +138,7 @@ app = FastAPI(
         "A permission-aware code context engine. "
         "M5 retrieves and proves; it does not reason or answer by default."
     ),
-    version="3.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -216,14 +216,14 @@ def health_check():
     return {
         "status": "online",
         "engine": "M5 v2 Context Engine",
-        "version": "3.1.0",
+        "version": "1.0.0",
         "dev_agent_mode": DEV_AGENT_MODE,
     }
 
 @app.get("/ready")
 def readiness_check():
     """Unauthenticated — Kubernetes readiness probe."""
-    return {"status": "ready", "engine": "M5 v2 Context Engine", "version": "3.1.0", "storage": "ok"}
+    return {"status": "ready", "engine": "M5 v2 Context Engine", "version": "1.0.0", "storage": "ok"}
 
 
 # ── Admin: API Key Management ─────────────────────────────────────────────────

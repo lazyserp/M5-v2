@@ -210,8 +210,40 @@ def get_context(
     warnings: List[str] = []
     omissions: List[str] = []
 
-    # ── Step 1: Hybrid search ─────────────────────────────────────────────────
-    raw_chunks = retriever.search_blocks(query=query, top_k=top_k * 2)
+    # ── Step 1: Hybrid search (Server Qdrant/BM25 or Local SQLite Graph) ──────
+    raw_chunks = []
+    try:
+        raw_chunks = retriever.search_blocks(query=query, top_k=top_k * 2)
+    except Exception:
+        raw_chunks = []
+
+    # Local SQLite Fallback if Qdrant is empty/offline
+    if not raw_chunks:
+        try:
+            from src.storage.local_db import LocalCodeGraphDB
+            local_db = LocalCodeGraphDB()
+            # Try symbol seek first
+            local_symbols = local_db.find_symbol(query, exact=False, limit=top_k)
+            # If not enough, try FTS
+            if len(local_symbols) < top_k:
+                fts_symbols = local_db.search_fts(query, limit=top_k)
+                for fs in fts_symbols:
+                    if not any(s["id"] == fs["id"] for s in local_symbols):
+                        local_symbols.append(fs)
+
+            for sym in local_symbols:
+                raw_chunks.append({
+                    "file_path": sym.get("file_path", ""),
+                    "symbol_name": sym.get("name", ""),
+                    "symbol_type": sym.get("kind", "code_block"),
+                    "start_line": sym.get("start_line", 1),
+                    "end_line": sym.get("end_line", 1),
+                    "content": sym.get("content", ""),
+                    "relevance_score": 0.95,
+                    "retrieval_method": "local_sqlite_ast_graph"
+                })
+        except Exception:
+            pass
 
     # Enrich chunks with explainable metadata and architectural concern
     enriched_chunks = []
