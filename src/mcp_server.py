@@ -19,7 +19,7 @@ try:
     from importlib.metadata import version as _get_pkg_ver
     SERVER_VERSION = _get_pkg_ver("m5-engine")
 except Exception:
-    SERVER_VERSION = "1.0.0"
+    SERVER_VERSION = "1.0.1"
 
 def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
     """Auto-indexes the default workspace on stdio boot if the default index is currently empty."""

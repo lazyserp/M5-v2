@@ -45,7 +45,7 @@ except Exception:
         from importlib.metadata import version as _get_version
         VERSION = _get_version("m5")
     except Exception:
-        VERSION = "1.0.0"
+        VERSION = "1.0.1"
 
 def print_help():
     print(f"""
