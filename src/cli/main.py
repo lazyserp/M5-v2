@@ -45,7 +45,7 @@ except Exception:
         from importlib.metadata import version as _get_version
         VERSION = _get_version("m5-engine")
     except Exception:
-        VERSION = "1.1.2"
+        VERSION = "1.1.3"
 
 def print_help():
     print(f"""
