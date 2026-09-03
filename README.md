@@ -1,35 +1,54 @@
 # M5 Engine
 
-> **AST code intelligence and dependency graph engine for AI coding agents.**  
-> Give Cursor, Claude Code, Windsurf, or Copilot instant whole-repo context without burning tokens or waiting on grep. Runs completely offline on your machine — zero Docker, zero open ports, zero cloud dependencies.
+> **The zero-cost, air-gapped AST code intelligence & dependency graph engine for AI coding agents.**  
+> Give Cursor, Claude Code, Windsurf, or Copilot instant whole-repo execution context without burning LLM tokens, cluttering your repo with markdown summaries, or waiting on grep. Runs 100% locally on your machine — zero API keys to index, zero Docker, zero open ports, zero code egress.
 
 [![PyPI version](https://img.shields.io/pypi/v/m5-engine.svg)](https://pypi.org/project/m5-engine/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
 ---
 
-## Why we built this
+## Why M5?
 
-If you've used AI coding agents on codebases with more than 50 files, you've probably seen this loop:
+If you've used AI coding agents on codebases with more than 50 files, you've probably hit the **Agent Context Trap**:
 
-1. You ask the agent to fix a bug or trace a feature.
-2. The agent runs `grep` or `find`, gets 120 hits, and starts reading entire 1,500-line files one by one.
-3. Within 3 turns, it burns 40,000 tokens, hits context limits, forgets previous instructions, and still misses the actual function that handles the request because it was called through an interface or helper.
+```
+Without M5 (The Grep / Naive RAG Death Spiral):
+1. You ask your agent to fix a bug or trace an execution flow.
+2. The agent runs grep, gets 150 hits, and starts reading entire 1,500-line files one by one.
+3. Within 3 turns, it burns 50,000 tokens, loses track of previous instructions, and still
+   misses the actual caller because it went through an interface or helper.
 
-**M5 fixes this.**
+With M5 (Surgical 1-Shot Retrieval):
+1. The agent calls m5_get_context("checkout_flow").
+2. M5 traverses the AST call graph and dense semantic index in <20ms.
+3. The agent receives:
+   - The exact target function at Rank 1 (verbatim source, never truncated).
+   - All upstream entry points (controllers, routes, CLI handlers).
+   - All downstream callees (database queries, external APIs).
+   - An ASCII execution flow diagram and a verified completeness check.
+   Total context cost: under 2,000 tokens (up to 90% token savings).
+```
 
-Instead of making your agent wander blindly, M5 parses your codebase's AST (Abstract Syntax Tree) using Tree-sitter, builds a local call graph in SQLite, and indexes symbols with sub-token BM25 and embedded dense vectors. 
+---
 
-When your agent asks `m5_get_context`, M5 returns:
-- The **exact target function/class** at Rank 1 (complete verbatim source, no arbitrary line truncation).
-- **Upstream entry points** (which API routes, CLI commands, or controllers call it).
-- **Downstream dependencies** (which queries, utilities, or external APIs it calls).
-- An **ASCII execution flow diagram** showing the full call path.
-- A **completeness check** confirming whether the execution chain was fully resolved.
-- **Token metrics** showing exactly how many tokens were saved compared to reading whole files.
+## How M5 Compares
 
-All in **one single MCP call**, usually under 2,000 tokens.
+Not all code graph tools are built the same. Other tools either bill your API key to summarize files, clutter your repository with generated markdown documents, or dump fuzzy multi-modal graphs into your agent's context window.
+
+| Feature / Metric | **M5 Engine** | **Graft** (`@nanonets/graft`) | **Graphify** (`graphifyy`) | **Naive Grep / Flat RAG** |
+| :--- | :---: | :---: | :---: | :---: |
+| **Cost to Index** | **$0.00 (Zero LLM tokens)** | Burns LLM API tokens for summaries | Burns LLM tokens for extractions | $0.00 |
+| **Privacy & Security** | **100% Offline & Air-Gapped** | May leak code to LLM APIs | May send content to LLM APIs | Local |
+| **Index Footprint** | **Clean local SQLite + Rust Qdrant (`.m5/`)** | Pollutes repo with markdown files | Bulky multi-file graph export | None |
+| **Live Sync on Save** | **<50ms incremental watcher (`m5 live`)** | Slow re-summarization pass | Manual re-run | Instant (raw text) |
+| **Call Graph Precision** | **Exact AST call paths + leaf terminations** | High-level summary links | Entity relationship graph | None (keyword text matches) |
+| **Completeness Check** | **Yes (`fully_traced: true/false`)** | No | No | No |
+| **Visual Flow Diagram** | **ASCII execution chain in prompt** | No | Graph visualization files | None |
+| **Visual Dependency UI** | **Built-in (`m5 view` local web UI)** | None | Static graph viewer | None |
+| **CI/CD Cache Sharing** | **`m5 dump` & `m5 pull` bundles** | No standard bundle | No | Git |
+| **Git Impact Analysis** | **`m5 blast` & `m5 diff-tests`** | No | Blast radius only | None |
 
 ---
 
@@ -87,30 +106,30 @@ That's it. Your agent now has whole-codebase AST awareness.
 
 ---
 
-## What makes M5 different?
+## What Makes M5 Different?
 
-### 1. Zero Docker, zero background daemons, zero network egress
+### 1. Zero LLM Cost, Zero Docker, Zero Network Egress
 M5 is **100% pure embedded**:
 - **Graph & Symbols**: Local SQLite database (`.m5/local_graph.db`).
 - **Semantic Vectors**: Embedded Qdrant Rust engine (`.m5/qdrant_db`) running on CPU via ONNX Runtime (`BAAI/bge-small-en-v1.5`).
-- **Syntax Parsing**: Tree-sitter C bindings.
+- **Syntax Parsing**: Tree-sitter native C bindings.
 
-Nothing runs in the background when you aren't using it. No Docker containers. No ports open. No code ever leaves your machine.
+No external LLM calls are needed to index your project. No Docker containers. No open ports. No code ever leaves your workstation.
 
-### 2. Exact AST match ranking (No more nearby file noise)
+### 2. Exact AST Match Ranking (No More Nearby File Noise)
 Traditional vector search often ranks nearby files, READMEs, or comments above the actual function definition. M5 runs a dedicated AST symbol pass first. If you ask for `calculate_tax`, the actual `def calculate_tax(...)` function is always returned at **Rank 1 with 100% confidence**.
 
-### 3. Full verbatim source code (No truncation slop)
+### 3. Full Verbatim Source Code (No Truncation Slop)
 Target definitions are returned with their complete bodies intact — never chopped in half with `... [truncated]` markers. Secondary/supporting chunks include structured summaries (`signature`, `line_range`, `callers_count`, `callees_count`) to keep context windows compact without overflowing IDE buffers into annoying temporary files.
 
-### 4. End-to-end execution flow diagrams
-M5 traces the multi-hop call graph and provides a visual flow summary:
+### 4. End-to-End Execution Flow Diagrams
+M5 traces the multi-hop call graph and provides a visual flow summary directly into the agent's prompt:
 ```text
 Entry: [src/api/routes.py (checkout_endpoint)] --> Target: [process_payment] --> Leaves: [stripe.Charge.create, db.save_order]
 ```
 
-### 5. Automated completeness checks
-M5 tells the agent whether the full path was traced or where it terminated:
+### 5. Automated Completeness Checks
+M5 explicitly tells the agent whether the full execution path was resolved or where it terminated:
 ```json
 "completeness_check": {
   "fully_traced": false,
@@ -121,7 +140,7 @@ M5 tells the agent whether the full path was traced or where it terminated:
 }
 ```
 
-### 6. Transparent token savings metrics
+### 6. Transparent Token Savings Metrics
 Every retrieval reports the exact token impact:
 ```json
 "metrics": {
@@ -135,8 +154,8 @@ Every retrieval reports the exact token impact:
 }
 ```
 
-### 7. Auto-healing indexes
-If an agent connects to a new workspace where `m5 build` hasn't been run yet, M5 detects the empty index and automatically runs an initial scan on the first request. The agent never fails with an empty-index error.
+### 7. Auto-Healing Indexes & Real-Time Sync
+If an agent connects to a new workspace where `m5 build` hasn't been run yet, M5 detects the empty index and automatically runs an initial scan on the first request. While coding, `m5 live` updates the call graph incrementally on file save in under 50ms.
 
 ---
 
@@ -265,4 +284,6 @@ pytest test
 
 ## License
 
-MIT License. Free to use, modify, and distribute.
+Copyright (c) 2024-2026 Aman. All rights reserved.
+
+M5 is free for personal use, testing, and evaluation. Commercial redistribution, re-hosting, or sublicensing without prior written permission is prohibited. For enterprise or team commercial licensing, contact: lazyserp@gmail.com.
