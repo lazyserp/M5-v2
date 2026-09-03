@@ -381,8 +381,6 @@ def get_context(
     # ── Step 0: Exact AST Symbol Matching (Rank 1 Priority) ───────────────────
     exact_ast_chunks: List[Dict[str, Any]] = []
     try:
-        from src.storage.local_db import LocalCodeGraphDB
-        local_db = LocalCodeGraphDB()
         tokens_to_check = [query.strip()]
         query_words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", query)
         stop_words = {"the", "and", "for", "how", "where", "what", "function", "class", "method", "def", "code", "file", "all"}
@@ -390,23 +388,45 @@ def get_context(
             if len(w) >= 3 and w.lower() not in stop_words and w not in tokens_to_check:
                 tokens_to_check.append(w)
 
-        for token in tokens_to_check:
-            exact_matches = local_db.find_symbol(token, exact=True, limit=5, repo_filter=repo_filter)
-            for em in exact_matches:
-                sig = f"{em.get('file_path')}:{em.get('start_line')}"
-                if not any(f"{c.get('file_path')}:{c.get('start_line')}" == sig for c in exact_ast_chunks):
-                    exact_ast_chunks.append({
-                        "file_path": em.get("file_path", ""),
-                        "symbol_name": em.get("name", ""),
-                        "symbol_type": em.get("kind", "symbol"),
-                        "start_line": em.get("start_line", 1),
-                        "end_line": em.get("end_line", 1),
-                        "content": em.get("content", ""),
-                        "relevance_score": 1.0,
-                        "repo_id": em.get("repo_id", "local"),
-                        "retrieval_method": "exact_ast_symbol",
-                        "is_exact_ast": True
-                    })
+        # Check tenant retriever's in-memory blocks first for strict tenant isolation
+        if hasattr(retriever, "indexed_blocks") and retriever.indexed_blocks:
+            for b in retriever.indexed_blocks:
+                b_name = b.get("symbol_name") or b.get("name")
+                if b_name and any(b_name.lower() == t.lower() for t in tokens_to_check):
+                    sig = f"{b.get('file_path')}:{b.get('start_line')}"
+                    if not any(f"{c.get('file_path')}:{c.get('start_line')}" == sig for c in exact_ast_chunks):
+                        exact_ast_chunks.append({
+                            "file_path": b.get("file_path", ""),
+                            "symbol_name": b_name,
+                            "symbol_type": b.get("symbol_type") or b.get("kind", "symbol"),
+                            "start_line": b.get("start_line", 1),
+                            "end_line": b.get("end_line", 1),
+                            "content": b.get("content", ""),
+                            "relevance_score": 1.0,
+                            "repo_id": b.get("repo_id", resolved_repo),
+                            "retrieval_method": "exact_ast_symbol",
+                            "is_exact_ast": True
+                        })
+
+        if not exact_ast_chunks:
+            effective_filter = repo_filter or ([resolved_repo] if resolved_repo != "default_repo" else None)
+            for token in tokens_to_check:
+                exact_matches = d_graph.db.find_symbol(token, exact=True, limit=5, repo_filter=effective_filter)
+                for em in exact_matches:
+                    sig = f"{em.get('file_path')}:{em.get('start_line')}"
+                    if not any(f"{c.get('file_path')}:{c.get('start_line')}" == sig for c in exact_ast_chunks):
+                        exact_ast_chunks.append({
+                            "file_path": em.get("file_path", ""),
+                            "symbol_name": em.get("name", ""),
+                            "symbol_type": em.get("kind", "symbol"),
+                            "start_line": em.get("start_line", 1),
+                            "end_line": em.get("end_line", 1),
+                            "content": em.get("content", ""),
+                            "relevance_score": 1.0,
+                            "repo_id": em.get("repo_id", "local"),
+                            "retrieval_method": "exact_ast_symbol",
+                            "is_exact_ast": True
+                        })
     except Exception:
         pass
 
@@ -417,14 +437,12 @@ def get_context(
     except Exception:
         raw_chunks = []
 
-    # Local SQLite Fallback or complement
+    # Tenant-isolated SQLite Fallback or complement
     if len(raw_chunks) < top_k:
         try:
-            from src.storage.local_db import LocalCodeGraphDB
-            local_db = LocalCodeGraphDB()
-            local_symbols = local_db.find_symbol(query, exact=False, limit=top_k, repo_filter=repo_filter)
+            local_symbols = d_graph.db.find_symbol(query, exact=False, limit=top_k, repo_filter=repo_filter)
             if len(local_symbols) < top_k:
-                fts_symbols = local_db.search_fts(query, limit=top_k, repo_filter=repo_filter)
+                fts_symbols = d_graph.db.search_fts(query, limit=top_k, repo_filter=repo_filter)
                 for fs in fts_symbols:
                     if not any(s.get("name") == fs.get("name") and s.get("file_path") == fs.get("file_path") for s in local_symbols):
                         local_symbols.append(fs)
