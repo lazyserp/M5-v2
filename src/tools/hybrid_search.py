@@ -245,8 +245,6 @@ class HybridRetriever:
         """
         self.indexed_blocks.extend(blocks)
         self.bm25_index.index_blocks(self.indexed_blocks)
-        # Persist to disk — makes BM25 restart-proof
-        _save_bm25_blocks(self.org_id, self.dept_id, self.repo_id, self.indexed_blocks)
         return self.vector_store.index_blocks(blocks, batch_size=batch_size)
 
     def search_blocks(
@@ -255,39 +253,47 @@ class HybridRetriever:
         top_k: int = 5,
         rrf_k: int = 60,
         score_threshold: float = 0.20,
+        repo_filter: Optional[List[str]] = None,
         federated_collections: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Returns structured list of top-k code chunks ranked via Reciprocal Rank Fusion (RRF).
+        Returns structured list of top-k code chunks ranked via Reciprocal Rank Fusion (RRF),
+        supporting repo_filter for enterprise ACL isolation.
         """
         # 1. Retrieve Dense Candidates from Qdrant
-        query_vector = list(self.vector_store.embedder.embed([query]))[0].tolist()
         try:
-            dense_results = self.vector_store.client.query_points(
-                collection_name=self.vector_store.collection_name,
-                query=query_vector,
-                limit=top_k * 3,
-                score_threshold=score_threshold
-            ).points
+            dense_results = self.vector_store.search_raw_points(
+                query=query,
+                top_k=top_k * 3,
+                score_threshold=score_threshold,
+                repo_filter=repo_filter,
+                federated_collections=federated_collections
+            )
         except Exception:
             dense_results = []
 
         # 2. Retrieve Sparse Candidates from BM25
-        bm25_results = self.bm25_index.query(query, top_k=top_k * 3)
+        raw_bm25 = self.bm25_index.query(query, top_k=top_k * 4)
+        bm25_results = []
+        for doc, b_score in raw_bm25:
+            doc_repo = doc.get("repo_id", "local")
+            if repo_filter and doc_repo not in repo_filter:
+                continue
+            bm25_results.append((doc, b_score))
+        bm25_results = bm25_results[:top_k * 3]
 
         # 3. Reciprocal Rank Fusion (RRF)
         fusion_map: Dict[str, Dict[str, Any]] = {}
 
-        for rank, r in enumerate(dense_results, start=1):
-            p = r.payload or {}
-            sig = f"{p.get('file_path')}:{p.get('start_line')}:{p.get('end_line')}:{p.get('name')}"
+        for rank, item in enumerate(dense_results, start=1):
+            sig = f"{item.get('file_path')}:{item.get('start_line')}:{item.get('end_line')}:{item.get('name')}"
             if sig not in fusion_map:
                 fusion_map[sig] = {
-                    "data": p,
+                    "data": item,
                     "rrf_score": 0.0,
                     "dense_rank": rank,
                     "bm25_rank": None,
-                    "dense_score": r.score
+                    "dense_score": item.get("score", 0.0)
                 }
             fusion_map[sig]["rrf_score"] += 1.0 / (rrf_k + rank)
 
@@ -320,7 +326,8 @@ class HybridRetriever:
                 "symbol_type": p.get("type", "unknown"),
                 "relevance_score": round(item["rrf_score"], 4),
                 "retrieval_method": "hybrid_rrf",
-                "content": p.get("content", "")
+                "content": p.get("content", ""),
+                "repo_id": p.get("repo_id", "local")
             })
 
         return chunks

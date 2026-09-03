@@ -3,14 +3,62 @@ import uuid
 import hashlib
 import re
 import threading
+import atexit
 from typing import Optional, List, Dict, Any
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchAny
 from fastembed import TextEmbedding
-from src.config import QDRANT_URL, QDRANT_API_KEY
+
+# Suppress interpreter-shutdown deallocator exceptions in QdrantClient / QdrantLocal
+try:
+    _orig_qdrant_del = getattr(QdrantClient, "__del__", None)
+    def _safe_qdrant_del(self: Any) -> None:
+        try:
+            if _orig_qdrant_del:
+                _orig_qdrant_del(self)
+        except BaseException:
+            pass
+    QdrantClient.__del__ = _safe_qdrant_del
+except Exception:
+    pass
+
+try:
+    from qdrant_client.local.qdrant_local import QdrantLocal
+    _orig_local_close = getattr(QdrantLocal, "close", None)
+    def _safe_local_close(self: Any, **kwargs: Any) -> None:
+        try:
+            if _orig_local_close:
+                _orig_local_close(self, **kwargs)
+        except BaseException:
+            pass
+    QdrantLocal.close = _safe_local_close
+except Exception:
+    pass
 
 _CLIENT_CACHE: Dict[str, QdrantClient] = {}
 _CLIENT_LOCK = threading.Lock()
+
+def close_all_qdrant_clients() -> None:
+    """
+    Cleanly closes all active Qdrant clients before interpreter shutdown.
+    Releases flock handles while sys.meta_path and modules are intact.
+    """
+    global _IN_MEMORY_CLIENT, _CLIENT_CACHE
+    with _CLIENT_LOCK:
+        for client in list(_CLIENT_CACHE.values()):
+            try:
+                client.close()
+            except BaseException:
+                pass
+        _CLIENT_CACHE.clear()
+        if _IN_MEMORY_CLIENT is not None:
+            try:
+                _IN_MEMORY_CLIENT.close()
+            except BaseException:
+                pass
+            _IN_MEMORY_CLIENT = None
+
+atexit.register(close_all_qdrant_clients)
 
 _EMBEDDER_INSTANCE: Optional[TextEmbedding] = None
 _EMBEDDER_LOCK = threading.Lock()
@@ -36,12 +84,18 @@ def sanitize_collection_name(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", name.lower().strip())
     return cleaned if cleaned else "m5_default"
 
+def _default_qdrant_storage() -> str:
+    dot_m5 = os.path.join(os.getcwd(), ".m5")
+    os.makedirs(dot_m5, exist_ok=True)
+    return os.path.join(dot_m5, "qdrant_db")
+
 def _try_local_qdrant(norm_path: str) -> Optional[QdrantClient]:
     """
     Attempts to open a local Qdrant storage folder.
     Falls back to in-memory mode if disk storage is locked or incompatible.
     """
     try:
+        os.makedirs(norm_path, exist_ok=True)
         client = QdrantClient(path=norm_path, check_compatibility=False)
         client.get_collections()
         return client
@@ -52,14 +106,14 @@ def _try_local_qdrant(norm_path: str) -> Optional[QdrantClient]:
 _IN_MEMORY_CLIENT: Optional[QdrantClient] = None
 
 def get_shared_qdrant_client(
-    storage_path: str = "./qdrant_storage",
+    storage_path: Optional[str] = None,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
     in_memory: bool = False
 ) -> QdrantClient:
     """
-    Returns a shared Qdrant client, managing singletons for embedded local disk storage
-    or shared in-memory storage to prevent file lock contention and preserve vectors.
+    Returns a shared Qdrant client. Defaults to pure in-process embedded disk mode
+    in .m5/qdrant_db with zero Docker overhead, or connects to remote Qdrant if URL is set.
     """
     global _IN_MEMORY_CLIENT
 
@@ -69,35 +123,25 @@ def get_shared_qdrant_client(
                 _IN_MEMORY_CLIENT = QdrantClient(location=":memory:", check_compatibility=False)
             return _IN_MEMORY_CLIENT
 
-    target_url = url or os.getenv("QDRANT_URL") or QDRANT_URL
-    target_api_key = api_key or os.getenv("QDRANT_API_KEY") or QDRANT_API_KEY
-    if target_api_key and not str(target_api_key).strip():
-        target_api_key = None
+    target_url = (url or os.getenv("QDRANT_URL", "")).strip()
+    target_api_key = (api_key or os.getenv("QDRANT_API_KEY", "")).strip() or None
 
-    # Try configured URL, then Docker internal hostname, then localhost
-    candidate_urls = []
+    # Only connect over network if an explicit remote URL was provided
     if target_url:
-        candidate_urls.append(target_url)
-    if "http://qdrant:6333" not in candidate_urls:
-        candidate_urls.append("http://qdrant:6333")
-    if "http://localhost:6333" not in candidate_urls:
-        candidate_urls.append("http://localhost:6333")
-
-    for c_url in candidate_urls:
         try:
-            # Only send API key if configured and relevant
-            client_kwargs = {"url": c_url, "timeout": 2, "check_compatibility": False}
+            client_kwargs = {"url": target_url, "timeout": 3, "check_compatibility": False}
             if target_api_key:
                 client_kwargs["api_key"] = target_api_key
             client = QdrantClient(**client_kwargs)
-            client.get_collections()  # Active health probe
+            client.get_collections()
             return client
         except Exception:
-            continue
+            pass  # Fall back to local embedded mode if remote is unreachable
 
-    # Thread-safe client reuse for local disk storage (with shared in-memory fallback)
+    # Local embedded disk storage (0 Docker, 0 network ports, in-process)
+    disk_path = storage_path or _default_qdrant_storage()
     with _CLIENT_LOCK:
-        norm_path = os.path.abspath(storage_path)
+        norm_path = os.path.abspath(disk_path)
         if norm_path not in _CLIENT_CACHE:
             local_client = _try_local_qdrant(norm_path)
             if local_client is None:
@@ -110,15 +154,16 @@ def get_shared_qdrant_client(
 
 class VectorStore:
     """
-    Enterprise Multi-Tenant Vector Store for Qdrant.
-    Provides strict departmental and repository isolation with zero cross-tenant leakage.
+    Universal Vector Store for Qdrant.
+    Supports in-process embedded storage for solo developers and remote cluster storage
+    with repo-level ACL filtering for enterprises.
     """
     def __init__(
         self,
         org_id: str = "default_org",
         dept_id: str = "default_dept",
         repo_id: str = "default_repo",
-        storage_path: str = "./qdrant_storage",
+        storage_path: Optional[str] = None,
         url: Optional[str] = None,
         api_key: Optional[str] = None,
         in_memory: bool = False,
@@ -296,3 +341,67 @@ class VectorStore:
             )
 
         return output
+
+    def search_raw_points(
+        self,
+        query: str,
+        top_k: int = 5,
+        score_threshold: float = 0.25,
+        repo_filter: Optional[List[str]] = None,
+        federated_collections: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns structured block dicts with similarity scores, supporting repo_filter for ACL.
+        """
+        query_vector = list(self.embedder.embed([query]))[0].tolist()
+        collections_to_search = [self.collection_name]
+
+        if federated_collections:
+            for fc in federated_collections:
+                clean_fc = sanitize_collection_name(fc)
+                if self.client.collection_exists(clean_fc) and clean_fc not in collections_to_search:
+                    collections_to_search.append(clean_fc)
+
+        qdrant_filter = None
+        if repo_filter:
+            qdrant_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="repo_id",
+                        match=MatchAny(any=repo_filter)
+                    )
+                ]
+            )
+
+        all_matches = []
+        for col in collections_to_search:
+            try:
+                results = self.client.query_points(
+                    collection_name=col,
+                    query=query_vector,
+                    query_filter=qdrant_filter,
+                    limit=top_k,
+                    score_threshold=score_threshold
+                ).points
+                all_matches.extend(results)
+            except Exception:
+                continue
+
+        all_matches.sort(key=lambda x: x.score, reverse=True)
+        top_matches = all_matches[:top_k]
+
+        structured = []
+        for r in top_matches:
+            p = r.payload or {}
+            structured.append({
+                "name": p.get("name", "anonymous"),
+                "file_path": p.get("file_path", "unknown"),
+                "start_line": p.get("start_line", 0),
+                "end_line": p.get("end_line", 0),
+                "type": p.get("type", "unknown"),
+                "content": p.get("content", ""),
+                "score": float(r.score),
+                "repo_id": p.get("repo_id", self.repo_id),
+                "retrieval_method": "dense_vector"
+            })
+        return structured

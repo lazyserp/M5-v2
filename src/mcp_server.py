@@ -19,12 +19,26 @@ try:
     from importlib.metadata import version as _get_pkg_ver
     SERVER_VERSION = _get_pkg_ver("m5-engine")
 except Exception:
-    SERVER_VERSION = "1.0.1"
+    SERVER_VERSION = "1.1.1"
 
 def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
     """Auto-indexes the default workspace on stdio boot if the default index is currently empty."""
+    workspace_root = os.getenv("WORKSPACE_ROOT", ".")
+    if os.path.exists("/workspace") and not os.path.exists(workspace_root):
+        workspace_root = "/workspace"
+
     if os.getenv("M5_LOCAL_MODE") == "true":
+        from src.storage.local_db import LocalCodeGraphDB
+        local_db = LocalCodeGraphDB(workspace_root=workspace_root)
+        stats = local_db.get_stats()
+        if stats.get("total_files", 0) > 0:
+            return
+        if os.path.exists(workspace_root):
+            from src.indexer.file_watcher import LocalFileWatcher
+            watcher = LocalFileWatcher(workspace_root)
+            watcher.initial_scan()
         return
+
     default_org = os.getenv("DEFAULT_ORG_ID", "default_org")
     default_dept = os.getenv("DEFAULT_DEPT_ID", "default_dept")
     default_repo = os.getenv("DEFAULT_REPO_ID", "default_repo")
@@ -33,9 +47,6 @@ def _ensure_workspace_indexed(org_id: str, dept_id: str, repo_id: str) -> None:
 
     status = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
     if status.get("total_blocks", 0) == 0:
-        workspace_root = os.getenv("WORKSPACE_ROOT", ".")
-        if os.path.exists("/workspace") and not os.path.exists(workspace_root):
-            workspace_root = "/workspace"
         if os.path.exists(workspace_root):
             files_count, blocks = progressive_indexer.tier0_instant_boot(
                 workspace_root=workspace_root,
@@ -76,10 +87,6 @@ def get_retrieval_tools(
         except Exception:
             pass
 
-    if os.getenv("M5_LOCAL_MODE") == "true":
-        d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
-        return None, d_graph
-
     _ensure_workspace_indexed(resolved_org, resolved_dept, resolved_repo)
     retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
     d_graph = PersistentDependencyGraph(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
@@ -90,9 +97,9 @@ MCP_TOOLS_SCHEMA = [
     {
         "name": "m5_get_context",
         "description": (
-            "ONE-CALL context fetch: hybrid search + dependency expansion + dedup + audit log. "
-            "Returns a structured ContextBundle with ranked code chunks, dependency edges, "
-            "and token estimates. Use this instead of chaining m5_search_code + m5_get_dependencies."
+            "[MANDATORY FIRST STEP / PREFER OVER GREP] Instant 1-call AST context. "
+            "Call this FIRST before searching or reading files. Returns exact ranked symbol definitions, "
+            "upstream callers, downstream dependencies, and token estimates in 1 step with zero token waste."
         ),
         "inputSchema": {
             "type": "object",
@@ -112,7 +119,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_search_code",
-        "description": "Hybrid retrieval (BM25 + dense vectors + RRF) across AST code blocks. Use m5_get_context for most cases; use this when you need raw ranked results only.",
+        "description": "[FAST HYBRID CODE SEARCH] High-speed AST symbol & semantic code search across all repository functions and classes. Use this INSTEAD of ripgrep or blind file searching.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -127,7 +134,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_read_lines",
-        "description": "Streams source code lines directly from disk with configurable context padding.",
+        "description": "[SURGICAL LINE VIEWER] Streams exact source code lines directly from disk with configurable context padding. Use this instead of reading entire files into memory.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -141,7 +148,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_get_dependencies",
-        "description": "Returns what files a given file imports (outgoing dependencies).",
+        "description": "[CALL GRAPH / IMPORTS] Returns all upstream files and symbols imported by this file. Call this before modifying code to understand dependencies.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -155,7 +162,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_get_dependents",
-        "description": "Returns which files import a given file (incoming dependencies / reverse lookup).",
+        "description": "[BLAST RADIUS ANALYSIS] Returns all downstream files and functions that depend on or import this symbol/file. Crucial for refactoring safely without breaking callers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -169,7 +176,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_find_symbol_references",
-        "description": "Finds where a function, class, or variable is defined — returns file paths and exact line ranges.",
+        "description": "[EXACT AST SYMBOL LOOKUP] Finds exact definition line ranges and usages for any function, class, or variable with Tree-sitter AST precision (zero false positives).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -224,7 +231,7 @@ MCP_TOOLS_SCHEMA = [
     },
     {
         "name": "m5_get_test_impact",
-        "description": "Calculates the call-graph blast radius and companion unit/integration test files affected by changing a function or file.",
+        "description": "[SURGICAL TEST IMPACT] Calculates call-graph blast radius and identifies exact companion unit/integration test files affected by modifying a function or file.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -381,6 +388,7 @@ class MCPServer:
                     org_id=org_id,
                     dept_id=dept_id,
                     repo_id=repo_id,
+                    repo_filter=args.get("repo_filter"),
                     requesting_user=args.get("requesting_user") or caller_name,
                     caller_identity=caller_name,
                 )
@@ -439,7 +447,31 @@ class MCPServer:
 
             elif tool_name == "m5_index_status":
                 _ensure_workspace_indexed(org_id, dept_id, repo_id)
-                status_dict = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
+                from src.storage.local_db import LocalCodeGraphDB
+                from src.indexer.progressive_indexer import _detect_git_commit
+                workspace_root = os.getenv("WORKSPACE_ROOT", ".")
+                local_db = LocalCodeGraphDB(workspace_root=workspace_root)
+                stats = local_db.get_stats()
+
+                if stats.get("total_files", 0) > 0:
+                    status_dict = {
+                        "org_id": org_id,
+                        "dept_id": dept_id,
+                        "repo_id": repo_id,
+                        "status": "ready",
+                        "is_fresh": True,
+                        "total_files": stats.get("total_files", 0),
+                        "total_blocks": stats.get("total_symbols", 0),
+                        "indexed_blocks": stats.get("total_symbols", 0),
+                        "is_indexing": False,
+                        "progress_percentage": 100.0,
+                        "commit_sha": _detect_git_commit(workspace_root),
+                        "database_path": local_db.db_path,
+                        "database_size_kb": stats.get("db_size_kb", 0),
+                        "last_error": None
+                    }
+                else:
+                    status_dict = progressive_indexer.get_status(org_id=org_id, dept_id=dept_id, repo_id=repo_id)
                 output = json.dumps(status_dict, indent=2)
 
             # ── Skills ────────────────────────────────────────────────────

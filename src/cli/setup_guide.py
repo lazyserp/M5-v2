@@ -67,15 +67,6 @@ def get_configs_dict() -> Dict[str, Dict[str, Any]]:
     if env:
         vscode_server_spec["env"] = env
 
-    # Antigravity format (supports "type": "stdio")
-    antigravity_server_spec: Dict[str, Any] = {
-        "type": "stdio",
-        "command": cmd,
-        "args": args,
-    }
-    if env:
-        antigravity_server_spec["env"] = env
-
     # 1. Antigravity IDE / Gemini CLI paths
     if system == "Windows":
         gemini_global_path = str(Path(os.getenv("USERPROFILE", str(Path.home()))) / ".gemini" / "config" / "mcp_config.json")
@@ -106,7 +97,10 @@ def get_configs_dict() -> Dict[str, Dict[str, Any]]:
     # 5. VS Code path
     vscode_path = ".vscode/mcp.json"
 
-    # 6. Codex CLI path
+    # 6. Windsurf (Codeium) path
+    windsurf_path = str(Path.home() / ".codeium" / "windsurf" / "mcp_config.json")
+
+    # 7. Codex CLI path
     codex_path = str(Path.home() / ".codex" / "config.json")
 
     return {
@@ -129,12 +123,13 @@ def get_configs_dict() -> Dict[str, Dict[str, Any]]:
             "target_file": f"{gemini_workspace_path} (Workspace) or {gemini_global_path} (Global)",
             "config": {
                 "mcpServers": {
-                    "m5": antigravity_server_spec
+                    "m5": base_server_spec
                 }
             },
             "where_to_paste": (
                 "Option A (Workspace level): Create `.agents/mcp_config.json` in your project root and paste the snippet.\n"
-                f"Option B (Global level): Edit your global configuration at:\n  {gemini_global_path}"
+                f"Option B (Global level): Edit your global configuration at:\n  {gemini_global_path}\n"
+                "(Note: Antigravity infers stdio transport implicitly; 'type' field is omitted)."
             )
         },
         "3": {
@@ -180,6 +175,19 @@ def get_configs_dict() -> Dict[str, Dict[str, Any]]:
             )
         },
         "6": {
+            "name": "Windsurf IDE (Codeium)",
+            "target_file": windsurf_path,
+            "config": {
+                "mcpServers": {
+                    "m5": base_server_spec
+                }
+            },
+            "where_to_paste": (
+                f"1. Open Windsurf Settings -> Cascade -> MCP Servers, or edit: {windsurf_path}\n"
+                "2. Paste the JSON block and restart Cascade."
+            )
+        },
+        "7": {
             "name": "Codex CLI & opencode",
             "target_file": codex_path,
             "config": {
@@ -195,14 +203,98 @@ def get_configs_dict() -> Dict[str, Dict[str, Any]]:
 
 
 AGENT_INSTRUCTION_MARKER = """<!-- M5 CONTEXT ENGINE START -->
-## M5 Code Context & AST Knowledge Graph
-This project uses M5 for instant AST code intelligence and dependency navigation.
-Instead of repeatedly reading entire files or running multiple grep commands:
-- Run `m5 trace "<query>"` to retrieve relevant symbol definitions, call hierarchies, and blast radius in 1 step.
-- Run `m5 peek <symbol>` to view the exact implementation and callers of any function or class.
-- Run `m5 callers <symbol>` or `m5 callees <symbol>` to navigate the call graph.
-- Run `m5 diff-tests` to see tests affected by modified files.
+# M5 Code Intelligence & AST Context Rules (MANDATORY)
+
+This project is indexed by the **M5 Context Engine** (`.m5/local_graph.db`).
+When analyzing, refactoring, or navigating code in this repository:
+
+1. **NEVER run blind grep / ripgrep** or read entire files into context to understand call flows.
+2. **ALWAYS use M5 tools FIRST**:
+   - **Via MCP**:
+     - `m5_get_context`: Call this FIRST for deep context (exact symbol bodies, upstream callers, downstream dependencies, and token estimates in 1 step).
+     - `m5_search_code`: High-speed AST symbol & semantic code search instead of grep.
+     - `m5_get_dependents` / `m5_get_dependencies`: Check blast radius before modifying any function, class, or module.
+     - `m5_find_symbol_references`: Exact AST symbol definitions and usages without false positives.
+     - `m5_read_lines`: Stream precise line ranges with context padding instead of reading whole files.
+     - `m5_get_test_impact`: Find test files impacted by changes.
+   - **Via Terminal / CLI** (if MCP is unavailable):
+     - `m5 trace "<query>"`: 1-shot deep context + call graph.
+     - `m5 peek <symbol>`: View function body & callers.
+     - `m5 callers <sym>` / `m5 callees <sym>`: Explore the call graph.
+     - `m5 blast <sym> --depth 2`: Check blast radius.
+     - `m5 diff-tests`: Tests affected by git changes.
 <!-- M5 CONTEXT ENGINE END -->"""
+
+
+def inject_agent_rules(target_dir: str = ".", quiet: bool = False) -> List[str]:
+    """
+    Injects or updates the M5 agent navigation rules in repository instruction files:
+    - AGENTS.md (Universal: Antigravity, Copilot, Gemini CLI, Claude)
+    - CLAUDE.md (Claude Code CLI)
+    - .cursorrules / .cursor/rules/m5.mdc (Cursor IDE)
+    - GEMINI.md
+
+    Preserves all existing user instructions and only replaces or adds the M5 block.
+    """
+    root = Path(target_dir).resolve()
+    target_files = [
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        root / ".cursorrules",
+        root / "GEMINI.md",
+    ]
+
+    # Check which instruction files already exist
+    existing_files = [f for f in target_files if f.exists()]
+
+    # If none exist, create AGENTS.md by default (universal standard)
+    if not existing_files:
+        existing_files = [root / "AGENTS.md"]
+
+    updated = []
+    start_tag = "<!-- M5 CONTEXT ENGINE START -->"
+    end_tag = "<!-- M5 CONTEXT ENGINE END -->"
+
+    for file_path in existing_files:
+        try:
+            if file_path.exists():
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                if start_tag in content and end_tag in content:
+                    # Replace existing M5 section cleanly
+                    pre = content.split(start_tag)[0]
+                    post = content.split(end_tag)[1]
+                    new_content = f"{pre.rstrip()}\n\n{AGENT_INSTRUCTION_MARKER}\n{post.lstrip()}"
+                else:
+                    # Append M5 section cleanly
+                    new_content = f"{content.rstrip()}\n\n{AGENT_INSTRUCTION_MARKER}\n"
+            else:
+                new_content = f"{AGENT_INSTRUCTION_MARKER}\n"
+
+            file_path.write_text(new_content, encoding="utf-8")
+            updated.append(file_path.name)
+        except Exception as e:
+            if not quiet:
+                print(f"[!] Could not update {file_path.name}: {e}")
+
+    # Also support Cursor's modern .cursor/rules/ directory if .cursor exists
+    cursor_dir = root / ".cursor" / "rules"
+    if (root / ".cursor").exists():
+        try:
+            cursor_dir.mkdir(parents=True, exist_ok=True)
+            cursor_rule_file = cursor_dir / "m5.mdc"
+            cursor_rule_file.write_text(
+                "---\ndescription: M5 AST Code Intelligence Rules\nglobs: *\n---\n\n" + AGENT_INSTRUCTION_MARKER + "\n",
+                encoding="utf-8"
+            )
+            updated.append(".cursor/rules/m5.mdc")
+        except Exception:
+            pass
+
+    if not quiet and updated:
+        print(f"[+] Injected M5 agent rules into: {', '.join(updated)}")
+        print(f"    AI agents will now automatically prefer M5 over grep/reading files.")
+
+    return updated
 
 
 def print_banner():
@@ -248,12 +340,12 @@ def run_setup_wizard(target: Optional[str] = None):
 
     if target:
         target_lower = target.lower().strip().replace("-", "").replace(" ", "").replace("_", "")
-        if target_lower in ["7", "all", "full"]:
+        if target_lower in ["8", "all", "full"]:
             for k in configs.keys():
                 print_agent_config(k)
             print_instructions_marker()
             return
-        if target_lower in ["8", "marker", "agent", "agents", "instructions"]:
+        if target_lower in ["9", "marker", "agent", "agents", "instructions"]:
             print_instructions_marker()
             return
 
@@ -267,34 +359,34 @@ def run_setup_wizard(target: Optional[str] = None):
             print(f"[!] No match found for '{target}'. Available targets:")
             for k, v in configs.items():
                 print(f"  [{k}] {v['name']}")
-            print("  [7] All Configurations")
-            print("  [8] Agent Instructions Marker")
+            print("  [8] All Configurations")
+            print("  [9] Agent Instructions Marker")
         return
 
     print("Choose your AI Editor / Agent to view manual setup instructions:\n")
     for k, v in configs.items():
         print(f"  [{k}] {v['name']}")
-    print("  [7] All Configurations (Full Output)")
-    print("  [8] Agent Instructions Marker (CLAUDE.md / AGENTS.md / GEMINI.md)")
+    print("  [8] All Configurations (Full Output)")
+    print("  [9] Agent Instructions Marker (CLAUDE.md / AGENTS.md / GEMINI.md)")
     print("  [q] Exit\n")
 
     try:
-        choice = input("Select an option (1-8 or q) [default: 7]: ").strip()
+        choice = input("Select an option (1-9 or q) [default: 8]: ").strip()
     except (EOFError, KeyboardInterrupt):
-        choice = "7"
+        choice = "8"
 
     if not choice:
-        choice = "7"
+        choice = "8"
 
     if choice.lower() in ["q", "exit"]:
         print("\nSetup exited. Run 'm5 help' to explore all commands.\n")
         return
 
-    if choice == "7":
+    if choice == "8":
         for k in configs.keys():
             print_agent_config(k)
         print_instructions_marker()
-    elif choice == "8":
+    elif choice == "9":
         print_instructions_marker()
     elif choice in configs:
         print_agent_config(choice)

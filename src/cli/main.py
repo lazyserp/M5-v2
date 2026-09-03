@@ -43,9 +43,9 @@ try:
 except Exception:
     try:
         from importlib.metadata import version as _get_version
-        VERSION = _get_version("m5")
+        VERSION = _get_version("m5-engine")
     except Exception:
-        VERSION = "1.0.1"
+        VERSION = "1.1.1"
 
 def print_help():
     print(f"""
@@ -57,6 +57,7 @@ Usage: m5 <command> [arguments] [options]
 
 Core Setup & Lifecycle:
   setup / connect     Interactive manual setup guide with exact MCP configs for your IDE
+  rules / instruct    Inject agent navigation rules into AGENTS.md, CLAUDE.md, .cursorrules
   build / init        Scan and build local SQLite AST graph in <1s (into .m5/)
   purge / uninit      Remove .m5/ index from current project
   scan / reindex      Force full workspace re-index
@@ -105,6 +106,12 @@ def cli_entrypoint():
         target = args[1] if len(args) > 1 and not args[1].startswith("-") else None
         run_setup_wizard(target=target)
 
+    # ── Agent Rules & Directives Injection ───────────────────────────────────
+    elif cmd in ["rules", "instruct", "prompt"]:
+        from src.cli.setup_guide import inject_agent_rules
+        target_dir = args[1] if len(args) > 1 and not args[1].startswith("-") else "."
+        inject_agent_rules(target_dir=target_dir)
+
     # ── Build / Init Graph ───────────────────────────────────────────────────
     elif cmd in ["build", "init", "scan", "reindex"]:
         from src.indexer.file_watcher import LocalFileWatcher
@@ -119,6 +126,10 @@ def cli_entrypoint():
         print(f"  - AST Symbols:   {stats.get('total_symbols', 0)}")
         print(f"  - Call Edges:    {stats.get('total_edges', 0)}")
         print(f"  - SQLite DB:     {stats.get('db_size_kb', 0)} KB ({db.db_path})\n")
+
+        # Auto-inject agent navigation rules so AI agents use M5 automatically
+        from src.cli.setup_guide import inject_agent_rules
+        inject_agent_rules(target_dir=target_dir)
 
     # ── Purge / Uninit ───────────────────────────────────────────────────────
     elif cmd in ["purge", "uninit"]:
@@ -189,52 +200,65 @@ def cli_entrypoint():
         print(f"  - Total Call Edges:  {stats.get('total_edges', 0)}")
         print(f"  - Database Size:     {stats.get('db_size_kb', 0)} KB\n")
 
-    # ── Trace (1-Shot Surgical Context) ──────────────────────────────────────
+    # ── Trace (1-Shot Surgical GraphRAG Context) ─────────────────────────────
     elif cmd in ["trace", "explore", "context"]:
         if len(args) < 2:
             print("[!] Usage: m5 trace \"<query or symbol name>\"")
             return
         query = " ".join(args[1:])
-        from src.storage.local_db import LocalCodeGraphDB
-        db = LocalCodeGraphDB()
-        symbols = db.search_fts(query, limit=5)
-        if not symbols:
-            symbols = db.find_symbol(query, exact=False, limit=5)
+        from src.context.context_engine import get_context
 
         print(f"\n=======================================================")
-        print(f"  [M5 Context Trace] Query: \"{query}\"")
+        print(f"  [M5 GraphRAG Context Trace] Query: \"{query}\"")
         print(f"=======================================================\n")
 
-        if not symbols:
-            print("[-] No matching AST symbols found in index. Run 'm5 build' to index your workspace.")
+        bundle = get_context(query=query, top_k=6, expand_dependencies=True)
+        chunks = bundle.get("chunks", [])
+
+        if not chunks:
+            print("[-] No matching code or AST symbols found. Run 'm5 build' to index your workspace.")
             return
 
-        for idx, sym in enumerate(symbols, 1):
-            name = str(sym.get("name", ""))
-            fpath = str(sym.get("file_path", ""))
-            s_line = sym.get("start_line", 1)
-            e_line = sym.get("end_line", 1)
-            kind = sym.get("kind", "symbol")
-            content = str(sym.get("content", ""))
+        for idx, c in enumerate(chunks, 1):
+            name = str(c.get("symbol_name", "anonymous"))
+            fpath = str(c.get("file_path", ""))
+            s_line = c.get("start_line", 1)
+            e_line = c.get("end_line", 1)
+            kind = str(c.get("symbol_type", "symbol")).upper()
+            concern = str(c.get("concern", "general")).upper()
+            match_type = str(c.get("match_type", "match")).upper()
+            confidence = str(c.get("confidence", "high")).upper()
+            content = str(c.get("content", ""))
+            callers = c.get("callers", [])
+            callees = c.get("callees", [])
 
-            callers = db.find_callers(name, limit=5)
-            callees = db.find_callees(fpath, name)
-            blast = db.get_impact_radius(name, depth=1)
-
-            print(f"[{idx}] {kind.upper()}: {name} ({fpath}:{s_line}-{e_line})")
+            print(f"[{idx}] [{concern}] {kind}: {name} ({fpath}:{s_line}-{e_line})")
+            print(f"    ⭐ Relevance: {c.get('relevance_score', 0.0)} | Type: {match_type} ({confidence})")
             if callers:
-                caller_str = ", ".join([f"{c['source_symbol']} ({c['source_file'].split('/')[-1].split('\\\\')[-1]})" for c in callers])
-                print(f"    ◀ Callers: {caller_str}")
+                print(f"    ◀ Callers: {', '.join(callers[:4])}")
             if callees:
-                callee_str = ", ".join([c["target_symbol"] for c in callees])
-                print(f"    ▶ Calls:   {callee_str}")
-            if blast.get("total_affected_files", 0) > 0:
-                print(f"    💥 Blast Radius: {blast['total_affected_symbols']} symbols across {blast['total_affected_files']} files")
+                print(f"    ▶ Calls:   {', '.join(callees[:4])}")
             print("    ───────────────────────────────────────────────────")
-            print("    " + "\n    ".join(content.splitlines()[:25]))
-            if len(content.splitlines()) > 25:
-                print("    ... (truncated)")
+            lines = content.splitlines()
+            print("    " + "\n    ".join(lines[:25]))
+            if len(lines) > 25:
+                print(f"    ... ({len(lines) - 25} more lines)")
             print("\n")
+
+        dep_edges = bundle.get("dependency_edges", [])
+        if dep_edges:
+            print("🔗 Connected Architecture Edges:")
+            for e in dep_edges[:6]:
+                src = os.path.basename(e.get("source", ""))
+                tgt = os.path.basename(e.get("target", ""))
+                rel = e.get("semantic_relationship") or e.get("relationship", "relates_to")
+                print(f"  • {src} ──[{rel}]──▶ {tgt}")
+            print()
+
+        tests = bundle.get("related_tests", [])
+        if tests:
+            print(f"🧪 Companion Tests ({len(tests)}): {', '.join([os.path.basename(t) for t in tests[:5]])}\n")
+
 
     # ── Peek / Inspect ───────────────────────────────────────────────────────
     elif cmd in ["peek", "inspect", "node"]:

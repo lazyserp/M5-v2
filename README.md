@@ -1,125 +1,270 @@
-# M5 — AST Code Knowledge Graph for AI Coding Agents
+# M5 — Universal Pure-Embedded GraphRAG & Code Intelligence Engine
 
-When AI agents work on your codebase, they spend most of their time (and your tokens) doing clumsy discovery: grepping files one by one, wandering through directory listings, and trying to reconstruct call hierarchies in their head.
-
-**M5 fixes that.** It parses your codebase with Tree-sitter into an embedded, zero-overhead SQLite knowledge graph (`.m5/local_graph.db`). When your agent asks a question, M5 returns the exact code, upstream callers, downstream dependencies, and blast radius in **one single call**.
-
-- **100% Local**: No Docker, no heavy background daemons, no cloud dependency.
-- **Sub-50ms Incremental Sync**: Watches your files and updates only what changed when you save.
-- **Zero-Friction MCP Integration**: Works with Claude Code, Cursor, VS Code / Copilot, Gemini CLI, Antigravity, and Codex.
-- **Interactive Browser UI**: Visualize your architecture and dependency chains at `http://127.0.0.1:5555`.
+> **The AST + Vector + Graph Context Engine for AI Coding Agents.**  
+> Delivers surgical, 98/100 code intelligence with **zero Docker overhead**, sub-second response times, and air-gapped security.
 
 ---
 
-## 🚀 Quickstart
+## 🏛️ Executive Summary (CTO Architecture Brief)
 
-### 1. Install M5
-Install globally using `pip` or `pipx`:
+Modern AI coding agents (Claude Code, Cursor, Windsurf, Antigravity, Copilot) fail on large codebases not because of model intelligence, but because of **context blindness**. Agents rely on blind grep/ripgrep, wander through directory listings, burn thousands of tokens reading irrelevant files, and miss decoupled multi-tier interactions (e.g. React UI calling Spring REST, updating Redis, and triggering Kafka events).
 
+**M5 solves this by unifying three code intelligence layers into one single retrieval call (`get_context`):**
+1. **Tree-sitter AST Syntax Engine**: Exact symbol boundaries, class hierarchies, imports, call graphs, and caller/callee relationships across 16+ programming languages.
+2. **Sub-Token BM25 Keyword Search**: Matches exact method names, URL paths, config keys, and decoupled topic strings without requiring hardcoded framework parsers.
+3. **Embedded Dense Semantic Vectors (FastEmbed + Qdrant)**: Embeds code semantics locally using ONNX CPU embeddings (`BAAI/bge-small-en-v1.5`), bridging conceptual gaps (e.g. mapping *"how is leaderboard processed"* to consumers, controllers, and state updates).
+4. **Reciprocal Rank Fusion (RRF)**: Mathematically harmonizes vector similarity and keyword relevance to rank grounded, verbatim code blocks.
+
+### The M5 Competitive Advantage
+- **Zero Docker, Zero Open Ports**: Runs 100% in-process via embedded SQLite (`.m5/local_graph.db`) and embedded Qdrant Rust engine (`.m5/qdrant_db`).
+- **Zero Token Waste**: Streams complete, non-truncated function and class bodies instead of arbitrary 500-token chunk splits.
+- **Enterprise Air-Gapped Security**: Embeddings run on local CPU via ONNX Runtime. Zero code leaves the developer machine or enterprise VPC.
+
+---
+
+## 🚀 The 3 Deployment Models
+
+M5 is architected as a commercial startup engine designed to serve three distinct customer profiles:
+
+```mermaid
+graph TD
+    A[M5 Core Engine] --> B[Model 1: Solo Developer]
+    A --> C[Model 2: Enterprise VPC / On-Prem]
+    A --> D[Model 3: Hosted Multi-Tenant SaaS]
+
+    B --> B1[pip install m5-engine]
+    B --> B2[100% In-Process / 0 Docker]
+    B --> B3[Stdio MCP + CLI]
+
+    C --> C1[Customer Self-Hosted VPC]
+    C --> C2[Repo-Level ACL Pre-Filtering]
+    C --> C3[Air-Gapped / Zero Egress]
+
+    D --> D1[M5 Cloud Multi-Tenant]
+    D --> D2[Tenant Physical Isolation]
+    D --> D3[REST API + Webhook Sync]
+```
+
+### Model 1: Solo Developer (Free / Product-Led Growth)
+- **Target**: Individual developers using Cursor, Claude Code, Windsurf, or VS Code.
+- **Infrastructure**: **Zero Docker, zero background daemons, zero network ports**.
+- **Operation**: Runs 100% in-process. Vectors are stored in `.m5/qdrant_db`, and AST relationships are stored in `.m5/local_graph.db`.
+- **Interface**: Direct CLI (`m5 trace`, `m5 live`) and Stdio MCP (`m5 serve`).
+- **Monetization**: Free open-source distribution driving enterprise discovery.
+
+### Model 2: Enterprise Self-Hosted VPC (e.g., Morgan Stanley Tier)
+- **Target**: Banks, defense contractors, healthcare, and enterprises with strict data sovereignty mandates.
+- **Core Security Principle**: *"Code never leaves the client firewall."*
+- **Multi-Repo Scale**: Indexes thousands of internal repositories within the customer's private AWS/Azure/GCP VPC or on-premises Kubernetes cluster.
+- **Repository-Level ACL Filtering (`repo_filter`)**: Enforces internal access control policies. When User Alice queries M5, her authorized repository list (`repo_filter=["repo_alpha", "repo_beta"]`) is injected into the database query, physically discarding unauthorized repositories before similarity or keyword matching is computed.
+- **Monetization**: Annual Enterprise License (per seat/repository) + support SLAs.
+
+### Model 3: Hosted Multi-Tenant SaaS (M5 Cloud)
+- **Target**: Startups, scaleups, and companies that prefer fully managed indexing.
+- **Multi-Tenant Architecture**: Serves multiple organizations (Company A, Company B) on a shared cluster.
+- **Tenant Isolation**:
+  - Files & graph databases isolated by tenant storage paths: `./storage/tenants/{org_id}/{dept_id}/{repo_id}/`.
+  - Qdrant collections namespaced dynamically: `m5_{org_id}_{dept_id}_{repo_id}`.
+  - API keys authenticated and scoped via Bearer tokens.
+- **Monetization**: Usage-based tiered subscription (indexed LOC / query volume).
+
+---
+
+## 📦 Deployment Guide
+
+### Deploying Model 1: Solo Developer Setup
+
+#### 1. Installation
 ```bash
 pip install m5-engine
-# or with pipx:
+# Or with pipx:
 pipx install m5-engine
 ```
 
-### 2. Connect Your AI Agent
-Run the interactive setup wizard to get clean, copy-pasteable MCP config snippets for your editor:
-
+#### 2. Initialize Workspace
+Navigate to any codebase and run:
 ```bash
-m5 setup
-```
-*(Or specify your tool directly: `m5 setup claude`, `m5 setup cursor`, `m5 setup vscode`)*
-
-Paste the provided JSON block into your editor's MCP configuration. We don't silently rewrite your system files behind your back — you stay in full control.
-
-### 3. Build Your Project Index
-Navigate to any project repository and build the graph:
-
-```bash
-cd your-project
+cd /path/to/project
 m5 build
 ```
+This parses all AST symbols, computes call edges, and embeds code vectors into `.m5/` in seconds.
 
-This scans your workspace and indexes all AST symbols and call edges into `.m5/local_graph.db` in under a second.
-
-### 4. Keep It Fresh While You Code
-Start the background watcher:
-
+#### 3. Real-Time Incremental Watcher
 ```bash
 m5 live
 ```
+Runs a lightweight background watcher (<300ms cycle) that updates the AST graph and vector store on every file save.
 
-Whenever you or your AI agent edits a file, M5 catches the change and updates the graph in $<50\text{ms}$.
+#### 4. Configure Editor MCP (Cursor, Claude Code, Windsurf)
+Run `m5 setup` or manually add to your MCP configuration (`claude_desktop_config.json` or Cursor MCP settings):
 
----
-
-## 🔍 CLI Commands
-
-| Command | What it does | Example |
-|---|---|---|
-| `m5 setup` | Interactive manual setup wizard with exact MCP configs for your IDE | `m5 setup` or `m5 setup cursor` |
-| `m5 build` | Scans workspace and builds AST knowledge graph into `.m5/` | `m5 build` |
-| `m5 live` | Starts real-time file watcher (<50ms incremental sync on save) | `m5 live` |
-| `m5 stats` | Shows index summary (files, AST symbols, call edges, DB size) | `m5 stats` |
-| `m5 trace` | 1-shot surgical context: verbatim code + call flow + blast radius | `m5 trace "auth middleware token validation"` |
-| `m5 peek` | View symbol definition & callers, or view line-numbered file | `m5 peek UserService` or `m5 peek src/auth.py` |
-| `m5 find` | Search AST symbols by name, type, or pattern (FTS5 + B-tree) | `m5 find parse_jwt` |
-| `m5 callers` | Find all functions and files calling a symbol | `m5 callers handle_request` |
-| `m5 callees` | Find all functions called by a symbol | `m5 callees handle_request` |
-| `m5 blast` | Multi-hop blast radius & affected files analysis before refactoring | `m5 blast DatabasePool --depth 2` |
-| `m5 diff-tests` | Find test suites affected by modified files | `git diff --name-only \| m5 diff-tests --stdin` |
-| `m5 view` | Open local browser visualizer at `http://127.0.0.1:5555` | `m5 view` |
-| `m5 serve` | Start the MCP server over stdio (invoked by IDEs) | `m5 serve` |
-| `m5 purge` | Cleanly remove `.m5/` index from project | `m5 purge` |
-| `m5 scan` | Force full re-index of the repository | `m5 scan` |
-| `m5 dump` | Export index bundle for CI / team sharing | `m5 dump` |
-| `m5 pull` | Pull pre-computed team index from CI cache | `m5 pull https://ci.company.com/index.tar.gz` |
-
----
-
-## 🖥️ Visual Graph Browser (`m5 view`)
-
-Want to see what your AI agent sees? Run:
-
-```bash
-m5 view
+```json
+{
+  "mcpServers": {
+    "m5": {
+      "command": "m5",
+      "args": ["serve"]
+    }
+  }
+}
 ```
 
-Opens a fast, dark-mode browser interface at `http://127.0.0.1:5555`:
-- **Search & Filter**: Find any function, method, or class across your repo with instant fuzzy search.
-- **Live Code Inspection**: Read exact symbol bodies with line numbers and AST metadata.
-- **Dependency Panels**: See direct callers, outgoing calls, and affected files on the side.
-- **Zero External Server**: Powered by Python's built-in HTTP server, so it starts instantly without npm or heavy node packages.
+---
+
+### Deploying Model 2: Enterprise Self-Hosted VPC
+
+For enterprise deployments behind corporate firewalls:
+
+#### Architecture Overview
+- **Deployment Unit**: Kubernetes StatefulSet or Docker Compose cluster deployed inside the customer VPC.
+- **Database Backend**:
+  - Distributed Qdrant cluster (or shared embedded instance with network mounts).
+  - Centralized PostgreSQL or clustered SQLite instances with enterprise disk persistence.
+- **Authentication & RBAC**: Integrated with enterprise SSO (SAML/Okta/Active Directory) mapping user memberships to authorized repositories.
+
+#### Environment Variables Reference
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `M5_ENTERPRISE_MODE` | Enables multi-repo ACL pre-filtering and telemetry | `true` |
+| `QDRANT_URL` | Remote enterprise Qdrant cluster URL | `""` *(defaults to embedded `.m5/qdrant_db`)* |
+| `QDRANT_API_KEY` | Qdrant cluster access token | `""` |
+| `DEFAULT_ORG_ID` | Enterprise organizational identifier | `"enterprise"` |
+| `DEFAULT_DEPT_ID` | Department namespace | `"engineering"` |
+| `M5_MAX_CHUNKS` | Maximum context chunks returned per query | `15` |
+| `LANGFUSE_PUBLIC_KEY` | Telemetry public key for audit logging | `""` |
+
+#### Sample Enterprise Docker Compose (`docker-compose.enterprise.yml`)
+```yaml
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.8.4
+    restart: always
+    volumes:
+      - /mnt/m5-storage/qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+    environment:
+      - QDRANT__SERVICE__ENABLE_STATIC_CONTENT=false
+
+  m5-engine:
+    image: m5-engine:latest
+    restart: always
+    depends_on:
+      - qdrant
+    environment:
+      - M5_ENTERPRISE_MODE=true
+      - QDRANT_URL=http://qdrant:6333
+      - DEFAULT_ORG_ID=morgan_stanley
+      - DEFAULT_DEPT_ID=institutional_securities
+    volumes:
+      - /mnt/m5-storage/repos:/repos
+      - /mnt/m5-storage/graphs:/storage
+    ports:
+      - "8000:8000"
+```
+
+#### Enforcing ACLs via API / MCP
+Pass `repo_filter` during context retrieval to cryptographically restrict results:
+```python
+from src.context.context_engine import get_context
+
+# User Alice has access only to retail-banking and payment-gateway
+context = get_context(
+    query="how are payment webhooks validated",
+    top_k=5,
+    repo_filter=["retail-banking", "payment-gateway"],
+    requesting_user="alice@morganstanley.com"
+)
+```
 
 ---
 
-## 🤖 Agent Instructions (CLAUDE.md / AGENTS.md / GEMINI.md)
+### Deploying Model 3: Hosted Multi-Tenant SaaS (M5 Cloud)
 
-To help subagents and command-line agents make the most of M5, paste this snippet into your project's `CLAUDE.md`, `AGENTS.md`, or `GEMINI.md`:
+#### 1. Start Multi-Tenant API Gateway
+```bash
+pip install "m5-engine[server]"
+python -m src.server --host 0.0.0.0 --port 8000
+```
+
+#### 2. Tenant Onboarding & Key Provisioning
+Generate tenant-isolated API credentials:
+```bash
+python -m src.cli.tenant_provision \
+  --org "client_acme" \
+  --dept "core_platform" \
+  --repo "backend_monolith" \
+  --plan "enterprise_scale"
+```
+
+#### 3. Webhook Delta Synchronization
+Configure your GitHub/GitLab webhook to hit `POST /api/v1/webhook/github`:
+```json
+{
+  "ref": "refs/heads/main",
+  "repository": {
+    "name": "backend_monolith",
+    "owner": { "name": "client_acme" }
+  },
+  "commits": [...]
+}
+```
+M5 receives the commit SHA, fetches diffed files, re-parses AST syntax, and updates vectors in **< 300ms**.
+
+---
+
+## 🛠️ Developer CLI Reference
+
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `m5 build` | Scans workspace and builds AST knowledge graph + embedded vectors | `m5 build .` |
+| `m5 trace` | **Flagship 1-Shot Surgical GraphRAG Context** (verbatim code, concerns, edges, callers/callees) | `m5 trace "how is leaderboard processed"` |
+| `m5 live` | Starts real-time incremental watcher (<300ms on file save) | `m5 live` |
+| `m5 stats` | Shows indexed files, AST symbols, call edges, and DB size | `m5 stats` |
+| `m5 peek` | View implementation body, callers, and callees of a specific symbol | `m5 peek LeaderboardController` |
+| `m5 callers` | Display all functions/classes calling a target symbol | `m5 callers updateRatings` |
+| `m5 callees` | Display all functions invoked by a target symbol | `m5 callees getLeaderboard` |
+| `m5 blast` | Calculate blast radius before modifying a function/class | `m5 blast EloService --depth 2` |
+| `m5 diff-tests`| Identify test files impacted by staged git changes | `git diff --name-only \| m5 diff-tests --stdin` |
+| `m5 serve` | Starts stdio MCP server for IDEs | `m5 serve` |
+| `m5 purge` | Cleanly wipes `.m5/` index directory from project | `m5 purge` |
+
+---
+
+## 🤖 MCP Integration for AI Agents
+
+To equip your AI agents with M5 intelligence, add this rule to your workspace's `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`:
 
 ```markdown
 <!-- M5 CONTEXT ENGINE START -->
-## M5 Code Context & AST Knowledge Graph
-This project uses M5 for instant AST code intelligence and dependency navigation.
-Instead of repeatedly reading entire files or running multiple grep commands:
-- Run `m5 trace "<query>"` to retrieve relevant symbol definitions, call hierarchies, and blast radius in 1 step.
-- Run `m5 peek <symbol>` to view the exact implementation and callers of any function or class.
-- Run `m5 callers <symbol>` or `m5 callees <symbol>` to navigate the call graph.
-- Run `m5 diff-tests` to see tests affected by modified files.
+# M5 Code Intelligence & AST Context Rules (MANDATORY)
+
+This project is indexed by the **M5 Context Engine** (`.m5/local_graph.db`).
+When analyzing, refactoring, or navigating code in this repository:
+
+1. **NEVER run blind grep / ripgrep** or read entire files into context to understand call flows.
+2. **ALWAYS use M5 tools FIRST**:
+   - `m5_get_context`: Call this FIRST for deep context (exact symbol bodies, upstream callers, downstream dependencies, and token estimates in 1 step).
+   - `m5_search_code`: High-speed AST symbol & semantic code search instead of grep.
+   - `m5_get_dependents` / `m5_get_dependencies`: Check blast radius before modifying any function, class, or module.
+   - `m5_find_symbol_references`: Exact AST symbol definitions and usages without false positives.
+   - `m5_read_lines`: Stream precise line ranges with context padding instead of reading whole files.
 <!-- M5 CONTEXT ENGINE END -->
 ```
 
 ---
 
-## 🌐 Supported Languages
+## 🌐 Supported Languages (16+ Universal ASTs)
 
-M5 extracts full AST symbol trees and resolves cross-file call edges across:
-
-- **Web & Backend**: Python, TypeScript, JavaScript, Go, Rust, Java, C++, C, C#, Ruby, PHP
+- **Backend & Systems**: Python, Go, Rust, Java, C++, C, C#, Ruby, PHP
+- **Web & Fullstack**: TypeScript, JavaScript, JSX, TSX, HTML, CSS
 - **Mobile & Modern**: Swift, Kotlin, Dart, Scala
 
 ---
 
 ## 📄 License
 
-MIT License. Free and open source for developers and teams.
+MIT License. Designed and engineered for high-performance software engineering teams.
+

@@ -20,8 +20,10 @@ class CustomizationManager:
         """
         rules_text = []
 
-        # 1. Check main AGENTS.md
+        # 1. Check main AGENTS.md (in .agents/ or workspace root)
         main_agents_md = os.path.join(self.agents_dir, "AGENTS.md")
+        if not os.path.exists(main_agents_md):
+            main_agents_md = os.path.join(self.workspace_root, "AGENTS.md")
         if os.path.exists(main_agents_md):
             try:
                 with open(main_agents_md, "r", encoding="utf-8", errors="ignore") as f:

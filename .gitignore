@@ -30,6 +30,7 @@ qdrant_data/
 *.tar.gz
 
 # ── Local IDE, Editor & Live MCP Configuration ────────────────────────────────
+.cursor/
 .vscode/
 .idea/
 *.sublime-project
@@ -60,6 +61,8 @@ logs/
 
 # ── Agent System Internal Workspaces & Local Notes ────────────────────────────
 .agents/
+.m5/
+.m5_test_fixture/
 .vscode/
 implementation_plan.md
 task.md

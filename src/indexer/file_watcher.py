@@ -32,7 +32,7 @@ class LocalFileWatcher:
             return False
         return not self.ignore_filter.is_ignored(file_path, is_dir=False)
 
-    def sync_file(self, file_path: str):
+    def sync_file(self, file_path: str, vectorize: bool = True):
         """Re-parses and syncs a single modified file into SQLite in <50ms."""
         try:
             if not os.path.exists(file_path) or self.ignore_filter.is_ignored(file_path, is_dir=False):
@@ -58,13 +58,32 @@ class LocalFileWatcher:
             self.db.insert_edges_batch(edges)
 
             self._file_mtimes[file_path] = mtime
+
+            # Update embedded VectorStore for incremental sync
+            if vectorize and symbols:
+                try:
+                    from src.tools.vector_search import VectorStore
+                    vstore = VectorStore()
+                    v_blocks = [{
+                        "file_path": file_path,
+                        "name": s.get("name", "anonymous"),
+                        "type": s.get("type", "symbol"),
+                        "start_line": s.get("start_line", 1),
+                        "end_line": s.get("end_line", 1),
+                        "content": s.get("content", ""),
+                        "repo_id": "local"
+                    } for s in symbols]
+                    vstore.index_blocks(v_blocks)
+                except Exception:
+                    pass
         except Exception as e:
             pass
 
     def initial_scan(self) -> int:
-        """Performs initial walk and indexes all project files adhering to .gitignore."""
+        """Performs initial walk, builds SQLite graph, and embeds vectors into local Qdrant."""
         self.ignore_filter.reload()
         count = 0
+        all_blocks = []
         for root, dirs, files in os.walk(self.workspace_root):
             # Prune ignored directories before recursing
             dirs[:] = [
@@ -74,8 +93,38 @@ class LocalFileWatcher:
             for file in files:
                 full_path = os.path.join(root, file).replace("\\", "/")
                 if self._should_index(full_path):
-                    self.sync_file(full_path)
+                    self.sync_file(full_path, vectorize=False)
                     count += 1
+                    try:
+                        syms = self.db.get_file_symbols(full_path)
+                        for s in syms:
+                            all_blocks.append({
+                                "file_path": full_path,
+                                "name": s.get("name", "anonymous"),
+                                "type": s.get("kind", "symbol"),
+                                "start_line": s.get("start_line", 1),
+                                "end_line": s.get("end_line", 1),
+                                "content": s.get("content", ""),
+                                "repo_id": s.get("repo_id", "local")
+                            })
+                    except Exception:
+                        pass
+
+        # Vectorize all blocks into local embedded Qdrant and BM25 index
+        if all_blocks:
+            try:
+                from src.tools.vector_search import VectorStore
+                vstore = VectorStore()
+                vstore.index_blocks(all_blocks)
+            except Exception:
+                pass
+            try:
+                from src.tools.hybrid_search import get_hybrid_retriever
+                retriever = get_hybrid_retriever()
+                retriever.index_blocks(all_blocks)
+            except Exception:
+                pass
+
         return count
 
     def _watch_loop(self):

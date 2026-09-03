@@ -167,11 +167,14 @@ def get_context(
     org_id: str = "default_org",
     dept_id: str = "default_dept",
     repo_id: str = "default_repo",
+    repo_filter: Optional[List[str]] = None,
     requesting_user: Optional[str] = None,
     caller_identity: str = "unknown",
 ) -> Dict[str, Any]:
     """
     Bundled context retrieval — the flagship M5 call.
+    Combines FastEmbed vectors + BM25 keyword matching + Tree-sitter AST syntax
+    via Reciprocal Rank Fusion (RRF), with optional enterprise repo-level ACL filtering.
 
     Args:
         query:               Natural language query or code snippet.
@@ -179,7 +182,7 @@ def get_context(
         expand_dependencies: If True, also pull in explicit dependency edges and linked files.
         expand_depth:        How many hops to expand (1 = direct imports).
         max_chunk_chars:     Optional snippet size limit (None = complete method/class body).
-        org_id / dept_id / repo_id: Tenant namespace — strictly enforced.
+        repo_filter:         Optional list of allowed repo IDs for enterprise ACL isolation.
 
     Returns:
         A ContextBundle dict with chunks, explicit dependency edges, test citations, omissions, and explainable scores.
@@ -189,19 +192,6 @@ def get_context(
     resolved_dept = dept_id or os.getenv("DEFAULT_DEPT_ID", "default_dept")
     resolved_repo = repo_id or os.getenv("DEFAULT_REPO_ID", "default_repo")
 
-    # If still default_org, check if single custom collection exists in Qdrant
-    if resolved_org == "default_org" and resolved_repo == "default_repo":
-        try:
-            from src.tools.vector_search import get_shared_qdrant_client
-            client = get_shared_qdrant_client()
-            collections = [c.name for c in client.get_collections().collections if c.name.startswith("m5_")]
-            if len(collections) == 1 and collections[0] != "m5_default_org_default_dept_default_repo":
-                parts = collections[0][3:].split("_")
-                if len(parts) >= 3:
-                    resolved_org, resolved_dept, resolved_repo = parts[0], parts[1], "_".join(parts[2:])
-        except Exception:
-            pass
-
     request_id = str(uuid.uuid4())
 
     retriever = get_hybrid_retriever(org_id=resolved_org, dept_id=resolved_dept, repo_id=resolved_repo)
@@ -210,38 +200,39 @@ def get_context(
     warnings: List[str] = []
     omissions: List[str] = []
 
-    # ── Step 1: Hybrid search (Server Qdrant/BM25 or Local SQLite Graph) ──────
+    # ── Step 1: Hybrid search (Embedded Qdrant/BM25 + Local SQLite Graph) ─────
     raw_chunks = []
     try:
-        raw_chunks = retriever.search_blocks(query=query, top_k=top_k * 2)
+        raw_chunks = retriever.search_blocks(query=query, top_k=top_k * 2, repo_filter=repo_filter)
     except Exception:
         raw_chunks = []
 
-    # Local SQLite Fallback if Qdrant is empty/offline
-    if not raw_chunks:
+    # Local SQLite Fallback or complement
+    if len(raw_chunks) < top_k:
         try:
             from src.storage.local_db import LocalCodeGraphDB
             local_db = LocalCodeGraphDB()
-            # Try symbol seek first
-            local_symbols = local_db.find_symbol(query, exact=False, limit=top_k)
-            # If not enough, try FTS
+            local_symbols = local_db.find_symbol(query, exact=False, limit=top_k, repo_filter=repo_filter)
             if len(local_symbols) < top_k:
-                fts_symbols = local_db.search_fts(query, limit=top_k)
+                fts_symbols = local_db.search_fts(query, limit=top_k, repo_filter=repo_filter)
                 for fs in fts_symbols:
-                    if not any(s["id"] == fs["id"] for s in local_symbols):
+                    if not any(s.get("name") == fs.get("name") and s.get("file_path") == fs.get("file_path") for s in local_symbols):
                         local_symbols.append(fs)
 
             for sym in local_symbols:
-                raw_chunks.append({
-                    "file_path": sym.get("file_path", ""),
-                    "symbol_name": sym.get("name", ""),
-                    "symbol_type": sym.get("kind", "code_block"),
-                    "start_line": sym.get("start_line", 1),
-                    "end_line": sym.get("end_line", 1),
-                    "content": sym.get("content", ""),
-                    "relevance_score": 0.95,
-                    "retrieval_method": "local_sqlite_ast_graph"
-                })
+                sig = f"{sym.get('file_path')}:{sym.get('start_line')}"
+                if not any(f"{c.get('file_path')}:{c.get('start_line')}" == sig for c in raw_chunks):
+                    raw_chunks.append({
+                        "file_path": sym.get("file_path", ""),
+                        "symbol_name": sym.get("name", ""),
+                        "symbol_type": sym.get("kind", "code_block"),
+                        "start_line": sym.get("start_line", 1),
+                        "end_line": sym.get("end_line", 1),
+                        "content": sym.get("content", ""),
+                        "relevance_score": 0.85,
+                        "repo_id": sym.get("repo_id", "local"),
+                        "retrieval_method": "local_sqlite_ast_graph"
+                    })
         except Exception:
             pass
 
@@ -293,6 +284,24 @@ def get_context(
                 selected_chunks.append(c)
     else:
         selected_chunks = enriched_chunks[:top_k]
+
+    # Attach AST Callers & Callees
+    for c in selected_chunks:
+        sym_name = c.get("symbol_name")
+        f_path = c.get("file_path", "")
+        c["callers"] = []
+        c["callees"] = []
+        if sym_name and sym_name != "anonymous":
+            try:
+                callers = d_graph.db.find_callers(sym_name, limit=5, repo_filter=repo_filter)
+                c["callers"] = [
+                    f"{r['source_symbol']} ({os.path.basename(r['source_file'])})"
+                    for r in callers if r.get("source_symbol")
+                ]
+                callees = d_graph.db.find_callees(f_path, sym_name, repo_filter=repo_filter)
+                c["callees"] = [r["target_symbol"] for r in callees if r.get("target_symbol")]
+            except Exception:
+                pass
 
     # ── Step 3: Explicit Semantic Dependency Graph Edges ──────────────────────
     dep_edges: List[Dict[str, Any]] = []
