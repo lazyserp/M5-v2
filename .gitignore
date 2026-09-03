@@ -40,8 +40,6 @@ Thumbs.db
 desktop.ini
 
 # ── Python Bytecode, Caches & Test Artifacts ──────────────────────────────────
-test/
-tests/
 __pycache__/
 *.py[cod]
 *$py.class
